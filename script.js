@@ -22,8 +22,8 @@ const MAX_CHARS      = 250;
 const PAGE_SIZE      = 50;
 const WEEK_MS        = 7 * 24 * 60 * 60 * 1000;
 const CHANNELS       = ["general", "offtopic"];
-// SET THIS TO YOUR UID after first login — instructions below
-const OWNER_UID      = "PASTE_YOUR_UID_HERE";
+// SET YOUR UID — loaded from Firebase at runtime (see setupOwner())
+const OWNER_UID_KEY = "ownerUid"; // stored in Firebase under /config/ownerUid
 
 // ============================================================
 // STATE
@@ -31,8 +31,9 @@ const OWNER_UID      = "PASTE_YOUR_UID_HERE";
 let currentUser     = null;
 let myUid           = null;
 let myUsername      = "";
-let myColor         = "#4da6ff";
+let myColor         = "#1a8fff";
 let myAvatar        = null;
+let ownerUid        = null;
 let currentChannel  = "general";
 let replyingTo      = null;
 let userScrolledUp  = false;
@@ -293,10 +294,16 @@ auth.onAuthStateChanged(async user => {
   myColor    = data.color || "#4da6ff";
   myAvatar   = data.avatarUrl || null;
 
-  // If this is the owner and UID hasn't been set yet, log it for them
-  if (OWNER_UID === "PASTE_YOUR_UID_HERE") {
-    console.log("👑 YOUR UID (paste into script.js OWNER_UID):", myUid);
-  }
+  // Load owner UID from Firebase (secure — not in client code)
+  db.ref("config/ownerUid").once("value", snap => {
+    ownerUid = snap.val();
+    // If ownerUid not set yet and this is the first user (K9fpoUStzQdGKGOFhKsrB0Bl5343), set it
+    if (!ownerUid && myUid === "K9fpoUStzQdGKGOFhKsrB0Bl5343") {
+      db.ref("config/ownerUid").set(myUid);
+      ownerUid = myUid;
+    }
+    updateSidebarUser();
+  });
 
   $("authScreen").style.display = "none";
   startApp();
@@ -380,7 +387,7 @@ function updateSidebarUser() {
   $("sidebarName").textContent = myUsername;
   $("sidebarName").style.color = myColor;
   const tagEl = $("sidebarTag");
-  if (myUid === OWNER_UID) {
+  if (ownerUid && myUid === ownerUid) {
     tagEl.textContent = "[Owner]";
     tagEl.style.color = "#ffffff";
     tagEl.style.textShadow = "0 0 8px rgba(255,255,255,0.7)";
@@ -646,7 +653,7 @@ function renderMessage(data, ch, isNew, prepend) {
   if (message && message.includes("@" + myUsername)) bubble.classList.add("mentioned");
 
   // Owner tag
-  if (userId === OWNER_UID) {
+  if (ownerUid && userId === ownerUid) {
     const tag = document.createElement("span"); tag.className = "owner-tag"; tag.textContent = "[Owner]";
     bubble.appendChild(tag);
   }
@@ -665,9 +672,16 @@ function renderMessage(data, ch, isNew, prepend) {
   const mtime = document.createElement("span"); mtime.className = "msg-time"; mtime.textContent = time;
   header.appendChild(uname); header.appendChild(mtime); bubble.appendChild(header);
 
-  // Text
+  // Text or image
   const textEl = document.createElement("div"); textEl.className = "msg-text";
-  textEl.innerHTML = parseMessage(message || "");
+  if (data.type === "image" && data.imageUrl) {
+    const img = document.createElement("img");
+    img.src = data.imageUrl; img.className = "msg-image"; img.alt = "Image";
+    img.addEventListener("click", () => openLightbox(data.imageUrl));
+    textEl.appendChild(img);
+  } else {
+    textEl.innerHTML = parseMessage(message || "");
+  }
   bubble.appendChild(textEl);
 
   // Reactions container
@@ -884,7 +898,6 @@ function setupInput() {
   const input = $("msgInput");
 
   input.addEventListener("input", () => {
-    // Auto-resize textarea
     input.style.height = "auto";
     input.style.height = Math.min(input.scrollHeight, 130) + "px";
     updateCharCounter();
@@ -901,6 +914,84 @@ function setupInput() {
   });
 
   $("sendBtn").addEventListener("click", sendMessage);
+  setupAttachButton();
+}
+
+function setupAttachButton() {
+  const btn = $("attachBtn");
+  const menu = $("attachMenu");
+  let menuOpen = false;
+
+  btn.addEventListener("click", e => {
+    e.stopPropagation();
+    menuOpen = !menuOpen;
+    menu.style.display = menuOpen ? "block" : "none";
+  });
+
+  document.addEventListener("click", () => { menu.style.display = "none"; menuOpen = false; });
+  menu.addEventListener("click", e => e.stopPropagation());
+
+  // Send image
+  $("attachMediaBtn").addEventListener("click", () => {
+    menu.style.display = "none"; menuOpen = false;
+    $("mediaInput").click();
+  });
+
+  $("mediaInput").addEventListener("change", async () => {
+    const file = $("mediaInput").files[0];
+    if (!file) return;
+    $("mediaInput").value = "";
+    if (file.size > 5 * 1024 * 1024) return showToast("Image must be under 5MB", "err");
+    showToast("Uploading image...");
+    const url = await uploadImgBB(file);
+    if (!url) return showToast("Upload failed", "err");
+    sendImageMessage(url);
+  });
+
+  // Send link
+  $("attachLinkBtn").addEventListener("click", () => {
+    menu.style.display = "none"; menuOpen = false;
+    const url = prompt("Enter a URL to share:");
+    if (!url || !url.trim()) return;
+    const trimmed = url.trim();
+    if (!/^https?:\/\//i.test(trimmed)) return showToast("Please enter a valid URL (https://...)", "warn");
+    sendLinkMessage(trimmed);
+  });
+}
+
+function sendImageMessage(imageUrl) {
+  const now = Date.now();
+  const msgData = {
+    name: myUsername, message: "", imageUrl,
+    time: new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" }),
+    timestamp: now, color: myColor, userId: myUid, avatarUrl: myAvatar || null,
+    type: "image"
+  };
+  db.ref("messages/" + currentChannel).push(msgData);
+  db.ref("users/" + myUid).update({ username: myUsername, color: myColor, avatarUrl: myAvatar || null });
+}
+
+function sendLinkMessage(url) {
+  const now = Date.now();
+  const msgData = {
+    name: myUsername, message: url,
+    time: new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" }),
+    timestamp: now, color: myColor, userId: myUid, avatarUrl: myAvatar || null
+  };
+  db.ref("messages/" + currentChannel).push(msgData);
+  db.ref("users/" + myUid).update({ username: myUsername, color: myColor, avatarUrl: myAvatar || null });
+}
+
+// Lightbox
+function openLightbox(src) {
+  let lb = $("lightbox");
+  if (!lb) {
+    lb = document.createElement("div"); lb.id = "lightbox";
+    lb.addEventListener("click", () => lb.remove());
+    document.body.appendChild(lb);
+  }
+  lb.innerHTML = `<img src="${src}" alt="Image">`;
+  lb.style.display = "flex";
 }
 
 function updateCharCounter() {
@@ -1023,7 +1114,6 @@ function setupSettings() {
     setMsg(msg, "✓ Username updated!", true);
   });
 
-  // Color picker
   const cp = $("colorPicker");
   cp.value = myColor;
   $("colorLabel").textContent = myColor;
@@ -1066,14 +1156,14 @@ async function checkUsernameCooldown() {
 // ============================================================
 const THEMES = {
   "Story Network": {
-    "--accent":"#4da6ff","--accent-hover":"#2e90f0",
-    "--accent-glow":"rgba(77,166,255,0.35)","--accent-light":"rgba(77,166,255,0.12)",
+    "--accent":"#1a8fff","--accent-hover":"#0070dd",
+    "--accent-glow":"rgba(26,143,255,0.38)","--accent-light":"rgba(26,143,255,0.13)",
     "--bg-darkest":"#060a10","--bg-dark":"#0c1420","--bg-mid":"#101d30",
     "--bg-light":"#152540","--bg-lighter":"#1a2e50","--bg-input":"#1f3660",
     "--text-primary":"#e3eeff","--text-muted":"#7a9cc0","--text-dim":"#3a5a80",
-    "--border":"rgba(77,166,255,0.08)","--border-hover":"rgba(77,166,255,0.18)",
+    "--border":"rgba(26,143,255,0.08)","--border-hover":"rgba(26,143,255,0.18)",
     "--msg-mine":"#1a3a6e","--msg-other":"#162035",
-    preview: { sidebar:"#101d30", chat:"#152540", accent:"#4da6ff" }
+    preview: { sidebar:"#101d30", chat:"#152540", accent:"#1a8fff" }
   },
   "Dark": {
     "--accent":"#5865f2","--accent-hover":"#4752c4",
