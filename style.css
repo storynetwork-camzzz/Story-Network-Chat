@@ -359,12 +359,13 @@ button { cursor: pointer; }
 
 /* OWNER BADGE — small pill, inline right next to the username, no gap */
 .owner-badge {
-  display: inline-flex; align-items: center;
-  font-size: 8px; font-weight: 900; letter-spacing: 0.07em;
-  padding: 1px 6px; border-radius: 20px; color: #fff;
-  background: linear-gradient(90deg, #1a8fff, #7b5ea7);
-  text-transform: uppercase; white-space: nowrap; flex-shrink: 0;
-  box-shadow: 0 0 6px rgba(26,143,255,0.4); line-height: 1.6;
+  /* This removes the 'box' look to match your sidebar */
+  font-size: 12px;
+  margin-left: 6px;
+  font-weight: 800;
+  vertical-align: middle;
+  text-transform: none; /* Keeps the brackets [Owner] looking correct */
+  user-select: none;
 }
 
 .msg-time {
