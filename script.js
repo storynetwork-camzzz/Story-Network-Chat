@@ -627,8 +627,17 @@ function renderMessage(data, ch, isNew, prepend) {
   uname.textContent=name; uname.style.color=nameColor;
   nameWrap.appendChild(uname);
   if (isOwnerMsg) {
-    const badge = document.createElement("span"); badge.className="owner-badge";
-    badge.textContent="Owner";
+    const badge = document.createElement("span"); 
+    badge.className = "owner-badge";
+    
+    // Apply the exact styles from your sidebar logic
+    badge.textContent = "[Owner]";
+    badge.style.color = "#ffffff";
+    badge.style.textShadow = "0 0 8px rgba(255,255,255,0.7)";
+    
+    // Optional: add a small margin so it doesn't touch the username
+    badge.style.marginLeft = "6px"; 
+    
     nameWrap.appendChild(badge);
   }
   header.appendChild(nameWrap);
