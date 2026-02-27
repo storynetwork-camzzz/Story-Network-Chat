@@ -620,26 +620,31 @@ function renderMessage(data, ch, isNew, prepend) {
     bubble.appendChild(q);
   }
 
-  // ── 2) Name row — username + badge glued together + time ──
+// ── 2) Name row — badge (if owner) + username + time ──
   const header = document.createElement("div"); header.className="msg-header";
   const nameWrap = document.createElement("span"); nameWrap.className="msg-name-wrap";
-  const uname = document.createElement("span"); uname.className="msg-username";
-  uname.textContent=name; uname.style.color=nameColor;
-  nameWrap.appendChild(uname);
+
+  // ADD THE BADGE FIRST (Left side)
   if (isOwnerMsg) {
     const badge = document.createElement("span"); 
     badge.className = "owner-badge";
-    
-    // Apply the exact styles from your sidebar logic
     badge.textContent = "[Owner]";
     badge.style.color = "#ffffff";
     badge.style.textShadow = "0 0 8px rgba(255,255,255,0.7)";
     
-    // Optional: add a small margin so it doesn't touch the username
-    badge.style.marginLeft = "6px"; 
+    // Switch to margin-right to push the name away from the badge
+    badge.style.marginRight = "6px"; 
     
     nameWrap.appendChild(badge);
   }
+
+  // ADD THE USERNAME SECOND (Right side)
+  const uname = document.createElement("span"); 
+  uname.className = "msg-username";
+  uname.textContent = name; 
+  uname.style.color = nameColor;
+  nameWrap.appendChild(uname);
+
   header.appendChild(nameWrap);
   const mtime = document.createElement("span"); mtime.className="msg-time"; mtime.textContent=time;
   header.appendChild(mtime);
