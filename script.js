@@ -77,6 +77,16 @@ function friendlyError(code) {
 }
 
 // ============================================================
+// SCROLL HELPERS
+// ============================================================
+function scrollToBottom(force) {
+  const cb = $("chatbox");
+  if (force || !userScrolledUp) {
+    cb.scrollTop = cb.scrollHeight;
+  }
+}
+
+// ============================================================
 // AVATAR BUILDER
 // ============================================================
 function buildAvatar(avatarUrl, username, color, size) {
@@ -294,6 +304,8 @@ function runLoadingBar() {
         $("loadingScreen").style.display = "none";
         $("appContainer").style.display = "flex";
         setupApp();
+        // Force scroll to bottom on initial load
+        setTimeout(() => { userScrolledUp = false; scrollToBottom(true); }, 120);
       }, 200);
     }
   }, 30);
@@ -314,6 +326,13 @@ function setupApp() {
   buildSizeRow();
   switchChannel("general");
   setupUnreadListeners();
+
+  // Single scroll listener — registered once here, never inside renderMessage
+  $("chatbox").addEventListener("scroll", function() {
+    const dist = this.scrollHeight - this.scrollTop - this.clientHeight;
+    userScrolledUp = dist > 120;
+    if (!userScrolledUp) $("scrollBtn").style.display = "none";
+  });
 }
 
 // ============================================================
@@ -458,6 +477,7 @@ function switchChannel(ch) {
   currentChannel = ch;
   $("chatbox").innerHTML = "";
   displayedMsgs[ch] = new Set();
+  userScrolledUp = false;
   document.querySelectorAll(".channel-btn").forEach(b => b.classList.toggle("selected", b.dataset.channel===ch));
   const labels = { general:"general", offtopic:"off-topic" };
   $("channelLabel").textContent = labels[ch]||ch;
@@ -483,12 +503,16 @@ function loadMessages(ch) {
       renderMessage(m, ch, false);
       if ((m.timestamp||0) > maxTs) maxTs = m.timestamp||0;
     });
+
     const loadBtn = document.createElement("button");
     loadBtn.className="load-more-btn"; loadBtn.textContent="📜 Load older messages";
     loadBtn.addEventListener("click", () => loadOlderMessages(ch, msgs[0]?.timestamp||0, loadBtn));
     if ($("chatbox").firstChild) $("chatbox").insertBefore(loadBtn, $("chatbox").firstChild);
     else $("chatbox").appendChild(loadBtn);
-    scrollToBottom();
+
+    // Force scroll to bottom after initial load
+    setTimeout(() => scrollToBottom(true), 50);
+
     const liveRef = baseRef.orderByChild("timestamp").startAt(maxTs+1);
     let ready = false;
     const fn = liveRef.on("child_added", snap2 => {
@@ -538,10 +562,13 @@ function setupUnreadListeners() {
 }
 
 // ============================================================
-// SCROLL
+// SCROLL BUTTON
 // ============================================================
-function scrollToBottom() { const cb=$("chatbox"); cb.scrollTop=cb.scrollHeight; }
-$("scrollBtn").addEventListener("click", () => { scrollToBottom(); $("scrollBtn").style.display="none"; userScrolledUp=false; });
+$("scrollBtn").addEventListener("click", () => {
+  userScrolledUp = false;
+  scrollToBottom(true);
+  $("scrollBtn").style.display = "none";
+});
 
 // ============================================================
 // ACTION BAR HELPERS
@@ -583,8 +610,7 @@ function renderMessage(data, ch, isNew, prepend) {
   bubble.dataset.channel   = ch;
   if (message && message.includes("@"+myUsername)) bubble.classList.add("mentioned");
 
-  // ── ORDER INSIDE BUBBLE ──
-  // 1) Reply quote (if any) — always topmost
+  // ── 1) Reply quote — always topmost ──
   if (replyTo) {
     const q = document.createElement("div"); q.className="reply-quote";
     const qName = document.createElement("span"); qName.className="reply-quote-name"; qName.textContent=replyTo.name;
@@ -594,11 +620,8 @@ function renderMessage(data, ch, isNew, prepend) {
     bubble.appendChild(q);
   }
 
-  // 2) Name row — username badge and time, all inline in one row
-  //    Owner badge is glued right next to the username, nothing separates them
+  // ── 2) Name row — username + badge glued together + time ──
   const header = document.createElement("div"); header.className="msg-header";
-
-  // Name + badge wrapped together so they're always adjacent
   const nameWrap = document.createElement("span"); nameWrap.className="msg-name-wrap";
   const uname = document.createElement("span"); uname.className="msg-username";
   uname.textContent=name; uname.style.color=nameColor;
@@ -609,12 +632,11 @@ function renderMessage(data, ch, isNew, prepend) {
     nameWrap.appendChild(badge);
   }
   header.appendChild(nameWrap);
-
   const mtime = document.createElement("span"); mtime.className="msg-time"; mtime.textContent=time;
   header.appendChild(mtime);
   bubble.appendChild(header);
 
-  // 3) Message content
+  // ── 3) Message content ──
   const textEl = document.createElement("div"); textEl.className="msg-text";
   if (data.type==="image" && data.imageUrl) {
     if (data.imageSpoiler) {
@@ -622,15 +644,21 @@ function renderMessage(data, ch, isNew, prepend) {
       const si = document.createElement("img"); si.src=data.imageUrl; si.className="msg-image";
       const sl = document.createElement("div"); sl.className="img-spoiler-label"; sl.innerHTML="👁 Click to reveal image";
       sw.appendChild(si); sw.appendChild(sl);
+      // Scroll down when spoiler image loads
+      si.addEventListener("load", () => { if (!userScrolledUp) scrollToBottom(true); });
       sw.addEventListener("click", e => {
         e.stopPropagation();
         sw.classList.add("revealed");
+        // Scroll down after reveal
+        requestAnimationFrame(() => { if (!userScrolledUp) scrollToBottom(true); });
         si.onclick = ev => { ev.stopPropagation(); openLightbox(data.imageUrl); };
       });
       textEl.appendChild(sw);
     } else {
       const img = document.createElement("img");
       img.src=data.imageUrl; img.className="msg-image"; img.alt="Image";
+      // Scroll down when image finishes loading
+      img.addEventListener("load", () => { if (!userScrolledUp) scrollToBottom(true); });
       img.addEventListener("click", e => { e.stopPropagation(); openLightbox(data.imageUrl); });
       textEl.appendChild(img);
     }
@@ -639,11 +667,11 @@ function renderMessage(data, ch, isNew, prepend) {
   }
   bubble.appendChild(textEl);
 
-  // 4) Reactions
+  // ── 4) Reactions ──
   const reactionsEl = document.createElement("div"); reactionsEl.className="reactions";
   bubble.appendChild(reactionsEl);
 
-  // 5) Action bar — only visible on click, NEVER on hover
+  // ── 5) Action bar — click-only, never hover ──
   const actionBar = document.createElement("div"); actionBar.className="msg-action-bar";
 
   const replyBtn = document.createElement("button"); replyBtn.className="msg-action-btn";
@@ -663,7 +691,7 @@ function renderMessage(data, ch, isNew, prepend) {
   });
   actionBar.appendChild(reactBtn);
 
-  // Delete — only rendered for the owner
+  // Delete — only for owner
   if (imOwner) {
     const delBtn = document.createElement("button"); delBtn.className="msg-action-btn delete-btn";
     delBtn.textContent="🗑 Delete";
@@ -681,12 +709,16 @@ function renderMessage(data, ch, isNew, prepend) {
 
   bubble.appendChild(actionBar);
 
-  // Click bubble → toggle action bar
+  // Click bubble → toggle action bar; scroll down if needed after it expands
   bubble.addEventListener("click", e => {
     const isOpen = actionBar.classList.contains("open");
     closeAllActionBars();
     closeAllEmojiPickers();
-    if (!isOpen) actionBar.classList.add("open");
+    if (!isOpen) {
+      actionBar.classList.add("open");
+      // Keep user at bottom if they were already there
+      requestAnimationFrame(() => { if (!userScrolledUp) scrollToBottom(true); });
+    }
     e.stopPropagation();
   });
 
@@ -712,16 +744,15 @@ function renderMessage(data, ch, isNew, prepend) {
     renderReactions(reactionsEl, snap.val()||{}, key, ch);
   });
 
+  // Scroll behaviour for new incoming messages
   if (isNew) {
-    if (!userScrolledUp) scrollToBottom();
-    else $("scrollBtn").style.display="flex";
+    if (!userScrolledUp) {
+      // Use rAF so the DOM has painted the new bubble before measuring height
+      requestAnimationFrame(() => scrollToBottom(true));
+    } else {
+      $("scrollBtn").style.display = "flex";
+    }
   }
-
-  $("chatbox").onscroll = function() {
-    const dist = this.scrollHeight - this.scrollTop - this.clientHeight;
-    userScrolledUp = dist > 120;
-    if (!userScrolledUp) $("scrollBtn").style.display="none";
-  };
 }
 
 // ============================================================
@@ -730,7 +761,7 @@ function renderMessage(data, ch, isNew, prepend) {
 function openEmojiPicker(msgId, ch, anchor) {
   closeAllEmojiPickers();
 
-  // Only emojis proven to render on all major platforms — no broken ones
+  // Only emojis that render reliably cross-platform
   const EMOJI_ROWS = [
     ["👍","👎","❤️","😂","😮","😢","😡","🎉","🔥","💯"],
     ["✅","❌","⭐","💀","👀","🙏","😀","😎","🤔","😴"],
@@ -759,13 +790,12 @@ function openEmojiPicker(msgId, ch, anchor) {
 
   document.body.appendChild(popup);
 
-  // Measure after appending so we get real dimensions
+  // Measure after appending
   const pw = popup.offsetWidth  || 340;
   const ph = popup.offsetHeight || 210;
   const rect = anchor.getBoundingClientRect();
   const vw = window.innerWidth, vh = window.innerHeight;
 
-  // Try above anchor first; fall back to below if not enough space
   let top  = rect.top - ph - 8;
   let left = rect.left + rect.width/2 - pw/2;
 
@@ -906,7 +936,7 @@ function setupAttachButton() {
     $("mediaInput").click();
   });
 
-  // SPOILER: set the flag BEFORE triggering the file picker
+  // SPOILER: set flag BEFORE opening file picker
   $("attachSpoilerBtn").addEventListener("click", () => {
     menu.style.display="none"; menuOpen=false;
     $("mediaInput").dataset.spoiler="true";
@@ -914,10 +944,10 @@ function setupAttachButton() {
   });
 
   $("mediaInput").addEventListener("change", async () => {
-    const file     = $("mediaInput").files[0];
-    const isSpoiler = $("mediaInput").dataset.spoiler === "true"; // read flag before clearing
+    const file      = $("mediaInput").files[0];
+    const isSpoiler = $("mediaInput").dataset.spoiler === "true"; // read BEFORE clearing
     if (!file) return;
-    $("mediaInput").value=""; // clear after reading flag
+    $("mediaInput").value="";
     if (file.size > 5*1024*1024) return showToast("Image must be under 5MB","err");
     showToast("Uploading image...");
     const url = await uploadImgBB(file);
@@ -1105,18 +1135,18 @@ async function checkUsernameCooldown() {
 }
 
 // ============================================================
-// THEMES
+// THEMES  (Story Network theme updated to match reference site)
 // ============================================================
 const THEMES = {
   "Story Network": {
-    "--accent":"#1a8fff","--accent-hover":"#0070dd",
-    "--accent-glow":"rgba(26,143,255,0.38)","--accent-light":"rgba(26,143,255,0.13)",
-    "--bg-darkest":"#060a10","--bg-dark":"#0c1420","--bg-mid":"#101d30",
-    "--bg-light":"#152540","--bg-lighter":"#1a2e50","--bg-input":"#1f3660",
-    "--text-primary":"#e3eeff","--text-muted":"#7a9cc0","--text-dim":"#3a5a80",
-    "--border":"rgba(26,143,255,0.08)","--border-hover":"rgba(26,143,255,0.18)",
-    "--msg-mine":"#1a3a6e","--msg-other":"#162035",
-    preview:{sidebar:"#101d30",chat:"#152540",accent:"#1a8fff"}
+    "--accent":"#0055ff","--accent-hover":"#0033cc",
+    "--accent-glow":"rgba(0,85,255,0.55)","--accent-light":"rgba(0,85,255,0.12)",
+    "--bg-darkest":"#030305","--bg-dark":"#07070f","--bg-mid":"#0a0a18",
+    "--bg-light":"#0d0d20","--bg-lighter":"#111128","--bg-input":"#14142e",
+    "--text-primary":"#e8e8ff","--text-muted":"#7070aa","--text-dim":"#35355a",
+    "--border":"rgba(0,85,255,0.10)","--border-hover":"rgba(0,85,255,0.28)",
+    "--msg-mine":"rgba(0,60,200,0.28)","--msg-other":"rgba(255,255,255,0.04)",
+    preview:{sidebar:"#0a0a18",chat:"#0d0d20",accent:"#0055ff"}
   },
   "Dark": {
     "--accent":"#5865f2","--accent-hover":"#4752c4",
