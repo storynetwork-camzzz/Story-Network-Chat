@@ -294,13 +294,14 @@ auth.onAuthStateChanged(async user => {
   myColor    = data.color || "#4da6ff";
   myAvatar   = data.avatarUrl || null;
 
-  // Load owner UID from Firebase (secure — not in client code)
+  // Load owner UID from Firebase — never stored in client code
   db.ref("config/ownerUid").once("value", snap => {
-    ownerUid = snap.val();
-    // If ownerUid not set yet and this is the first user (K9fpoUStzQdGKGOFhKsrB0Bl5343), set it
-    if (!ownerUid && myUid === "K9fpoUStzQdGKGOFhKsrB0Bl5343") {
-      db.ref("config/ownerUid").set(myUid);
-      ownerUid = myUid;
+    if (snap.val()) {
+      ownerUid = snap.val();
+    } else {
+      // No owner set yet — first account to log in becomes owner
+      // Firebase rule: config can only be written once (when empty), so this is safe
+      db.ref("config/ownerUid").set(myUid).then(() => { ownerUid = myUid; updateSidebarUser(); });
     }
     updateSidebarUser();
   });
@@ -631,14 +632,16 @@ $("scrollBtn").addEventListener("click", () => { scrollToBottom(); $("scrollBtn"
 // ============================================================
 function renderMessage(data, ch, isNew, prepend) {
   prepend = prepend || false;
-  const { key, name, message, time, timestamp, userId, color, avatarUrl, replyTo, reactions } = data;
+  const { key, message, time, timestamp, userId, color, avatarUrl, replyTo } = data;
+  const name = data.name || "Unknown";
   const isMine = userId === myUid;
   const nameColor = color || "#ffffff";
+  const isOwnerMsg = ownerUid && userId === ownerUid;
+  const imOwner = ownerUid && myUid === ownerUid;
 
   const wrapper = document.createElement("div");
   wrapper.className = "msg-wrapper " + (isMine ? "mine" : "other");
   wrapper.dataset.messageId = key;
-  wrapper.dataset.timestamp = timestamp || 0;
 
   // Avatar
   const avEl = buildAvatar(avatarUrl || null, name, nameColor, 34);
@@ -648,59 +651,99 @@ function renderMessage(data, ch, isNew, prepend) {
   const bubble = document.createElement("div");
   bubble.className = "message " + (isMine ? "mine" : "other");
   bubble.dataset.messageId = key;
-
-  // Mentioned?
+  bubble.dataset.channel = ch;
   if (message && message.includes("@" + myUsername)) bubble.classList.add("mentioned");
 
-  // Owner tag
-  if (ownerUid && userId === ownerUid) {
-    const tag = document.createElement("span"); tag.className = "owner-tag"; tag.textContent = "[Owner]";
-    bubble.appendChild(tag);
-  }
-
-  // Reply quote
+  // 1) Reply quote at very top
   if (replyTo) {
     const q = document.createElement("div"); q.className = "reply-quote";
     const qName = document.createElement("span"); qName.className = "reply-quote-name"; qName.textContent = replyTo.name;
-    const qText = document.createElement("span"); qText.className = "reply-quote-text"; qText.textContent = strip(replyTo.text).substring(0, 80);
+    const qText = document.createElement("span"); qText.className = "reply-quote-text";
+    qText.textContent = strip(replyTo.text || "").substring(0, 80);
     q.appendChild(qName); q.appendChild(qText); bubble.appendChild(q);
   }
 
-  // Header
+  // 2) Header: name + inline owner badge + time
   const header = document.createElement("div"); header.className = "msg-header";
-  const uname = document.createElement("span"); uname.className = "msg-username"; uname.textContent = name; uname.style.color = nameColor;
+  const uname = document.createElement("span"); uname.className = "msg-username";
+  uname.textContent = name; uname.style.color = nameColor;
+  header.appendChild(uname);
+  if (isOwnerMsg) {
+    const badge = document.createElement("span"); badge.className = "owner-badge";
+    badge.textContent = "Owner"; header.appendChild(badge);
+  }
   const mtime = document.createElement("span"); mtime.className = "msg-time"; mtime.textContent = time;
-  header.appendChild(uname); header.appendChild(mtime); bubble.appendChild(header);
+  header.appendChild(mtime);
+  bubble.appendChild(header);
 
-  // Text or image
+  // 3) Content
   const textEl = document.createElement("div"); textEl.className = "msg-text";
   if (data.type === "image" && data.imageUrl) {
-    const img = document.createElement("img");
-    img.src = data.imageUrl; img.className = "msg-image"; img.alt = "Image";
-    img.addEventListener("click", () => openLightbox(data.imageUrl));
-    textEl.appendChild(img);
+    if (data.imageSpoiler) {
+      const sw = document.createElement("div"); sw.className = "img-spoiler";
+      const si = document.createElement("img"); si.src = data.imageUrl; si.className = "msg-image";
+      const sl = document.createElement("div"); sl.className = "img-spoiler-label"; sl.innerHTML = "👁 Click to reveal image";
+      sw.appendChild(si); sw.appendChild(sl);
+      sw.addEventListener("click", e => {
+        e.stopPropagation();
+        sw.classList.add("revealed");
+        si.onclick = ev => { ev.stopPropagation(); openLightbox(data.imageUrl); };
+      });
+      textEl.appendChild(sw);
+    } else {
+      const img = document.createElement("img");
+      img.src = data.imageUrl; img.className = "msg-image"; img.alt = "Image";
+      img.addEventListener("click", e => { e.stopPropagation(); openLightbox(data.imageUrl); });
+      textEl.appendChild(img);
+    }
   } else {
     textEl.innerHTML = parseMessage(message || "");
   }
   bubble.appendChild(textEl);
 
-  // Reactions container
-  const reactionsEl = document.createElement("div"); reactionsEl.className = "reactions"; bubble.appendChild(reactionsEl);
+  // 4) Reactions
+  const reactionsEl = document.createElement("div"); reactionsEl.className = "reactions";
+  bubble.appendChild(reactionsEl);
 
-  // Reply action button
-  const replyBtn = document.createElement("button"); replyBtn.className = "reply-action"; replyBtn.textContent = "↩";
-  replyBtn.addEventListener("click", e => { e.stopPropagation(); setReply(key, name, message); });
-  bubble.appendChild(replyBtn);
+  // 5) Action bar — hidden until bubble clicked
+  const actionBar = document.createElement("div"); actionBar.className = "msg-action-bar";
 
-  // React button
-  const reactBtn = document.createElement("button"); reactBtn.className = "react-btn"; reactBtn.textContent = "😀";
-  reactBtn.addEventListener("click", e => { e.stopPropagation(); openEmojiPicker(key, ch, reactBtn); });
-  bubble.appendChild(reactBtn);
+  const replyBtn2 = document.createElement("button"); replyBtn2.className = "msg-action-btn";
+  replyBtn2.textContent = "↩ Reply";
+  replyBtn2.addEventListener("click", e => { e.stopPropagation(); setReply(key, name, message || ""); actionBar.classList.remove("open"); });
+  actionBar.appendChild(replyBtn2);
+
+  const reactBtn2 = document.createElement("button"); reactBtn2.className = "msg-action-btn";
+  reactBtn2.textContent = "😀 React";
+  reactBtn2.addEventListener("click", e => { e.stopPropagation(); openEmojiPicker(key, ch, reactBtn2); });
+  actionBar.appendChild(reactBtn2);
+
+  if (imOwner) {
+    const delBtn = document.createElement("button"); delBtn.className = "msg-action-btn delete-btn";
+    delBtn.textContent = "🗑 Delete";
+    delBtn.addEventListener("click", async e => {
+      e.stopPropagation();
+      actionBar.classList.remove("open");
+      const ok = await showConfirm("🗑️", "Delete Message", "This will delete the message for everyone.");
+      if (ok) db.ref("messages/" + ch + "/" + key).remove();
+    });
+    actionBar.appendChild(delBtn);
+  }
+
+  bubble.appendChild(actionBar);
+
+  // Click bubble to toggle action bar
+  bubble.addEventListener("click", e => {
+    const isOpen = actionBar.classList.contains("open");
+    document.querySelectorAll(".msg-action-bar.open").forEach(b => b.classList.remove("open"));
+    document.querySelectorAll(".emoji-popup").forEach(p => p.remove());
+    if (!isOpen) actionBar.classList.add("open");
+    e.stopPropagation();
+  });
 
   wrapper.appendChild(avEl);
   wrapper.appendChild(bubble);
 
-  // Insert at correct position
   const chatbox = $("chatbox");
   if (prepend) {
     const firstMsg = chatbox.querySelector(".msg-wrapper");
@@ -710,17 +753,21 @@ function renderMessage(data, ch, isNew, prepend) {
     chatbox.appendChild(wrapper);
   }
 
-  // Live reactions listener
+  // Live delete listener
+  db.ref("messages/" + ch + "/" + key).on("value", snap => {
+    if (!snap.exists()) { wrapper.remove(); }
+  });
+
+  // Live reactions
   db.ref("messages/" + ch + "/" + key + "/reactions").on("value", snap => {
     renderReactions(reactionsEl, snap.val() || {}, key, ch);
   });
 
   if (isNew) {
     if (!userScrolledUp) scrollToBottom();
-    else { $("scrollBtn").style.display = "flex"; }
+    else $("scrollBtn").style.display = "flex";
   }
 
-  // Scroll detection
   $("chatbox").onscroll = function() {
     const dist = this.scrollHeight - this.scrollTop - this.clientHeight;
     userScrolledUp = dist > 120;
@@ -732,37 +779,26 @@ function renderMessage(data, ch, isNew, prepend) {
 // EMOJI PICKER (native)
 // ============================================================
 function openEmojiPicker(msgId, ch, anchor) {
-  // Use native emoji picker via hidden input trick or EmojiButton
-  // We'll use a custom small grid of common emojis + native support
   document.querySelectorAll(".emoji-popup").forEach(p => p.remove());
+
+  const EMOJI_ROWS = [
+    ["👍","👎","❤️","😂","😮","😢","😡","🎉","🔥","💯"],
+    ["✅","❌","⭐","💀","👀","🙏","😀","😎","🤔","😴"],
+    ["🤣","😭","🥹","😤","🐸","🗿","🤡","👻","💩","🦆"],
+    ["🐧","🎮","💅","🫡","🥶","🥵","😈","👾","🤩","😏"],
+    ["🫀","🧠","👁","🫶","🤝","✌️","🤌","🫃","🤰","🫄"],
+  ];
 
   const popup = document.createElement("div");
   popup.className = "emoji-popup";
-  popup.style.cssText = `
-    position:fixed; background:var(--bg-mid); border:1px solid var(--border);
-    border-radius:12px; padding:10px; z-index:500; box-shadow:var(--shadow);
-    display:flex; flex-direction:column; gap:8px; max-width:280px;
-    animation: cardIn 0.15s ease;
-  `;
-
-  // Common emoji rows
-  const EMOJI_ROWS = [
-    ["👍","👎","❤️","😂","😮","😢","😡","🎉"],
-    ["🔥","💯","✅","❌","⭐","💀","👀","🙏"],
-    ["😀","😎","🤔","😴","🤣","😭","🥹","😤"],
-    ["🐸","💀","🗿","🤡","👻","💩","🦆","🐧"]
-  ];
 
   EMOJI_ROWS.forEach(row => {
-    const rowEl = document.createElement("div");
-    rowEl.style.cssText = "display:flex;gap:4px;";
+    const rowEl = document.createElement("div"); rowEl.className = "emoji-row";
     row.forEach(emoji => {
-      const btn = document.createElement("button");
+      const btn = document.createElement("button"); btn.className = "emoji-btn";
       btn.textContent = emoji;
-      btn.style.cssText = `background:none;border:none;font-size:20px;cursor:pointer;padding:4px 6px;border-radius:6px;transition:background 0.15s,transform 0.1s;`;
-      btn.addEventListener("mouseenter", () => btn.style.background = "var(--bg-lighter)");
-      btn.addEventListener("mouseleave", () => btn.style.background = "none");
-      btn.addEventListener("click", () => {
+      btn.addEventListener("click", e => {
+        e.stopPropagation();
         toggleReaction(msgId, ch, emoji);
         popup.remove();
       });
@@ -773,19 +809,29 @@ function openEmojiPicker(msgId, ch, anchor) {
 
   document.body.appendChild(popup);
 
-  // Position near anchor
+  // Measure after insert
+  const pw = popup.offsetWidth || 300;
+  const ph = popup.offsetHeight || 200;
   const rect = anchor.getBoundingClientRect();
-  const popupW = 280, popupH = 160;
-  let top = rect.top - popupH - 8;
-  let left = rect.left - popupW / 2;
+  const vw = window.innerWidth, vh = window.innerHeight;
+
+  let top = rect.top - ph - 8;
+  let left = rect.left + rect.width / 2 - pw / 2;
+
   if (top < 8) top = rect.bottom + 8;
+  if (top + ph > vh - 8) top = vh - ph - 8;
   if (left < 8) left = 8;
-  if (left + popupW > window.innerWidth - 8) left = window.innerWidth - popupW - 8;
-  popup.style.top = top + "px"; popup.style.left = left + "px";
+  if (left + pw > vw - 8) left = vw - pw - 8;
+
+  popup.style.top = top + "px";
+  popup.style.left = left + "px";
 
   setTimeout(() => {
     document.addEventListener("click", function close(e) {
-      if (!popup.contains(e.target) && e.target !== anchor) { popup.remove(); document.removeEventListener("click", close); }
+      if (!popup.contains(e.target)) {
+        popup.remove();
+        document.removeEventListener("click", close);
+      }
     });
   }, 10);
 }
@@ -934,18 +980,27 @@ function setupAttachButton() {
   // Send image
   $("attachMediaBtn").addEventListener("click", () => {
     menu.style.display = "none"; menuOpen = false;
+    $("mediaInput").dataset.spoiler = "false";
+    $("mediaInput").click();
+  });
+
+  // Send as spoiler image
+  $("attachSpoilerBtn").addEventListener("click", () => {
+    menu.style.display = "none"; menuOpen = false;
+    $("mediaInput").dataset.spoiler = "true";
     $("mediaInput").click();
   });
 
   $("mediaInput").addEventListener("change", async () => {
     const file = $("mediaInput").files[0];
+    const isSpoiler = $("mediaInput").dataset.spoiler === "true";
     if (!file) return;
     $("mediaInput").value = "";
     if (file.size > 5 * 1024 * 1024) return showToast("Image must be under 5MB", "err");
     showToast("Uploading image...");
     const url = await uploadImgBB(file);
     if (!url) return showToast("Upload failed", "err");
-    sendImageMessage(url);
+    sendImageMessage(url, isSpoiler);
   });
 
   // Send link
@@ -959,10 +1014,11 @@ function setupAttachButton() {
   });
 }
 
-function sendImageMessage(imageUrl) {
+function sendImageMessage(imageUrl, isSpoiler) {
   const now = Date.now();
   const msgData = {
     name: myUsername, message: "", imageUrl,
+    imageSpoiler: isSpoiler || false,
     time: new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" }),
     timestamp: now, color: myColor, userId: myUid, avatarUrl: myAvatar || null,
     type: "image"
@@ -1038,6 +1094,12 @@ function handleMentionSuggest() {
   drop.style.display = "block";
 }
 document.addEventListener("click", e => {
+  if (!e.target.closest(".message")) {
+    document.querySelectorAll(".msg-action-bar.open").forEach(b => b.classList.remove("open"));
+  }
+  if (!e.target.closest(".emoji-popup") && !e.target.closest(".msg-action-btn")) {
+    document.querySelectorAll(".emoji-popup").forEach(p => p.remove());
+  }
   if (e.target !== $("msgInput")) $("mentionDrop").style.display = "none";
 });
 
