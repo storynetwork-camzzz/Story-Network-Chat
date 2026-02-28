@@ -14,69 +14,37 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-
-  <!-- ========== AUTH SCREEN ========== -->
   <div id="authScreen">
-    <div class="auth-bg">
-      <div class="auth-grid"></div>
-      <div class="auth-glow"></div>
-    </div>
-
-    <!-- LOGIN CARD -->
+    <div class="auth-bg"><div class="auth-grid"></div><div class="auth-glow"></div></div>
     <div class="auth-card" id="loginCard">
       <div class="auth-logo">
         <img src="https://codehs.com/uploads/b9084e2547f1923caa433b97f16c89d1" alt="Story Network">
-        <div class="auth-logo-text">
-          <span class="auth-logo-title">Story Network</span>
-          <span class="auth-logo-sub">Chat</span>
-        </div>
+        <div class="auth-logo-text"><span class="auth-logo-title">Story Network</span><span class="auth-logo-sub">Chat</span></div>
       </div>
       <h2>Welcome back</h2>
       <p class="auth-subtitle">Sign in to continue chatting</p>
-      <div class="auth-field">
-        <label>Username</label>
-        <input id="loginUsername" type="text" placeholder="YourUsername" autocomplete="username">
-      </div>
-      <div class="auth-field">
-        <label>Password</label>
-        <input id="loginPassword" type="password" placeholder="••••••••" autocomplete="current-password">
-      </div>
+      <div class="auth-field"><label>Username</label><input id="loginUsername" type="text" placeholder="YourUsername" autocomplete="username"></div>
+      <div class="auth-field"><label>Password</label><input id="loginPassword" type="password" placeholder="••••••••" autocomplete="current-password"></div>
       <p id="loginError" class="auth-error"></p>
       <button id="loginBtn" class="auth-btn primary">Sign In</button>
       <p class="auth-switch">No account? <a id="showSignupBtn" href="#">Create one</a></p>
     </div>
-
-    <!-- SIGNUP CARD -->
     <div class="auth-card" id="signupCard" style="display:none;">
       <div class="auth-logo">
         <img src="https://codehs.com/uploads/b9084e2547f1923caa433b97f16c89d1" alt="Story Network">
-        <div class="auth-logo-text">
-          <span class="auth-logo-title">Story Network</span>
-          <span class="auth-logo-sub">Chat</span>
-        </div>
+        <div class="auth-logo-text"><span class="auth-logo-title">Story Network</span><span class="auth-logo-sub">Chat</span></div>
       </div>
       <h2>Create account</h2>
       <p class="auth-subtitle">Pick a username and password to get started</p>
-      <div class="auth-field">
-        <label>Username</label>
-        <input id="signupUsername" type="text" placeholder="CoolUsername" maxlength="24" autocomplete="off">
-        <span id="usernameHint" class="field-hint"></span>
-      </div>
-      <div class="auth-field">
-        <label>Password</label>
-        <input id="signupPassword" type="password" placeholder="At least 6 characters" autocomplete="new-password">
-      </div>
-      <div class="auth-field">
-        <label>Confirm Password</label>
-        <input id="signupConfirm" type="password" placeholder="Repeat your password" autocomplete="new-password">
-      </div>
+      <div class="auth-field"><label>Username</label><input id="signupUsername" type="text" placeholder="CoolUsername" maxlength="24" autocomplete="off"><span id="usernameHint" class="field-hint"></span></div>
+      <div class="auth-field"><label>Password</label><input id="signupPassword" type="password" placeholder="At least 6 characters" autocomplete="new-password"></div>
+      <div class="auth-field"><label>Confirm Password</label><input id="signupConfirm" type="password" placeholder="Repeat your password" autocomplete="new-password"></div>
       <p id="signupError" class="auth-error"></p>
       <button id="signupBtn" class="auth-btn primary">Create Account</button>
       <p class="auth-switch">Already have one? <a id="showLoginBtn" href="#">Sign in</a></p>
     </div>
   </div>
 
-  <!-- ========== LOADING ========== -->
   <div id="loadingScreen" style="display:none;">
     <div class="loading-inner">
       <img src="https://codehs.com/uploads/b9084e2547f1923caa433b97f16c89d1" alt="Loading" class="loading-logo">
@@ -85,37 +53,22 @@
     </div>
   </div>
 
-  <!-- ========== MAIN APP ========== -->
   <div id="appContainer" style="display:none;">
-
-    <!-- SIDEBAR -->
     <div id="sidebar">
       <div class="sidebar-header">
         <img src="https://codehs.com/uploads/b9084e2547f1923caa433b97f16c89d1" alt="SN" class="sidebar-logo">
         <span class="sidebar-title">Story Network Chat</span>
       </div>
-
       <div class="sidebar-section">
         <div class="sidebar-label">CHANNELS</div>
-        <button class="channel-btn selected" data-channel="general">
-          <span class="ch-hash">#</span>
-          <span class="ch-name">general</span>
-          <span class="unread-pip" id="pip-general" style="display:none;"></span>
-        </button>
-        <button class="channel-btn" data-channel="offtopic">
-          <span class="ch-hash">#</span>
-          <span class="ch-name">off-topic</span>
-          <span class="unread-pip" id="pip-offtopic" style="display:none;"></span>
-        </button>
+        <button class="channel-btn selected" data-channel="general"><span class="ch-hash">#</span><span class="ch-name">general</span><span class="unread-pip" id="pip-general" style="display:none;"></span></button>
+        <button class="channel-btn" data-channel="offtopic"><span class="ch-hash">#</span><span class="ch-name">off-topic</span><span class="unread-pip" id="pip-offtopic" style="display:none;"></span></button>
       </div>
-
-      <div class="sidebar-section">
+      <!-- FIX 2: online-section fills remaining sidebar space -->
+      <div class="sidebar-section online-section">
         <div class="sidebar-label">ONLINE — <span id="onlineCount">0</span></div>
         <div id="onlineList"></div>
       </div>
-
-      <div class="sidebar-spacer"></div>
-
       <div class="sidebar-user">
         <div class="user-avatar-wrap" id="avatarWrap" title="Click to change avatar">
           <div class="user-avatar" id="sidebarAvatar"></div>
@@ -133,30 +86,17 @@
       </div>
     </div>
 
-    <!-- CHAT AREA -->
     <div id="chatArea">
-      <div id="chatHeader">
-        <span class="ch-hash" style="font-size:18px;">#</span>
-        <span id="channelLabel">general</span>
-      </div>
-
+      <div id="chatHeader"><span class="ch-hash" style="font-size:18px;">#</span><span id="channelLabel">general</span></div>
       <div id="chatbox"></div>
-
       <button id="scrollBtn" style="display:none;">↓ New messages</button>
-
-      <div id="typingBar">
-        <div id="typingDisplay" class="typing-display"></div>
-      </div>
-
-      <!-- REPLY BAR -->
+      <div id="typingBar"><div id="typingDisplay" class="typing-display"></div></div>
       <div id="replyBar" style="display:none;">
         <span class="reply-icon">↩</span>
         <span>Replying to <strong id="replyName"></strong></span>
         <span class="reply-preview" id="replyPreview"></span>
         <button id="cancelReply">✕</button>
       </div>
-
-      <!-- FORMAT TOOLBAR -->
       <div id="formatToolbar">
         <button class="fmt-btn" data-fmt="bold" title="Bold"><b>B</b></button>
         <button class="fmt-btn" data-fmt="italic" title="Italic"><i>I</i></button>
@@ -164,20 +104,18 @@
         <button class="fmt-btn" data-fmt="code" title="Code"><span class="mono">&lt;/&gt;</span></button>
         <div class="fmt-divider"></div>
         <div class="color-palette">
-          <button class="color-dot" data-color=""       style="background:var(--text-primary);" title="Default"></button>
-          <button class="color-dot" data-color="red"    style="background:#ff4d4d;" title="Red"></button>
+          <button class="color-dot" data-color="" style="background:var(--text-primary);" title="Default"></button>
+          <button class="color-dot" data-color="red" style="background:#ff4d4d;" title="Red"></button>
           <button class="color-dot" data-color="orange" style="background:#ff9933;" title="Orange"></button>
           <button class="color-dot" data-color="yellow" style="background:#ffd700;" title="Yellow"></button>
-          <button class="color-dot" data-color="green"  style="background:#57f287;" title="Green"></button>
-          <button class="color-dot" data-color="blue"   style="background:#5b8aff;" title="Blue"></button>
+          <button class="color-dot" data-color="green" style="background:#57f287;" title="Green"></button>
+          <button class="color-dot" data-color="blue" style="background:#5b8aff;" title="Blue"></button>
           <button class="color-dot" data-color="purple" style="background:#c084fc;" title="Purple"></button>
-          <button class="color-dot" data-color="pink"   style="background:#f9a8d4;" title="Pink"></button>
+          <button class="color-dot" data-color="pink" style="background:#f9a8d4;" title="Pink"></button>
         </div>
         <div class="fmt-divider"></div>
         <button class="fmt-btn spoiler-btn" data-fmt="spoiler" title="Spoiler">👁 Spoiler</button>
       </div>
-
-      <!-- INPUT ROW -->
       <div id="inputRow">
         <div id="mentionDrop" style="display:none;"></div>
         <div id="attachMenu" style="display:none;">
@@ -194,43 +132,26 @@
     </div>
   </div>
 
-  <!-- ========== SETTINGS OVERLAY ========== -->
   <div id="settingsOverlay" style="display:none;">
     <div class="settings-card">
-      <div class="settings-header">
-        <h2>⚙️ Settings</h2>
-        <button id="settingsClose" class="close-btn">✕</button>
-      </div>
+      <div class="settings-header"><h2>⚙️ Settings</h2><button id="settingsClose" class="close-btn">✕</button></div>
       <div class="settings-body">
         <div class="settings-section">
           <div class="settings-section-label">USERNAME</div>
           <p class="settings-desc">Change your display name (once per week)</p>
-          <div class="settings-row">
-            <input id="newUsernameInput" class="settings-input" placeholder="New username" maxlength="24">
-            <button id="saveUsernameBtn" class="settings-save-btn">Save</button>
-          </div>
+          <div class="settings-row"><input id="newUsernameInput" class="settings-input" placeholder="New username" maxlength="24"><button id="saveUsernameBtn" class="settings-save-btn">Save</button></div>
           <p id="usernameChangeMsg" class="settings-msg"></p>
         </div>
         <div class="settings-section">
           <div class="settings-section-label">USERNAME COLOR</div>
-          <div class="settings-row">
-            <input type="color" id="colorPicker" class="settings-color-pick" value="#1a8fff">
-            <span id="colorLabel" class="settings-color-label">#4da6ff</span>
-          </div>
+          <div class="settings-row"><input type="color" id="colorPicker" class="settings-color-pick" value="#1a8fff"><span id="colorLabel" class="settings-color-label">#4da6ff</span></div>
         </div>
-        <div class="settings-section">
-          <div class="settings-section-label">THEME</div>
-          <div class="theme-grid" id="themeGrid"></div>
-        </div>
-        <div class="settings-section">
-          <div class="settings-section-label">TEXT SIZE</div>
-          <div class="size-row" id="sizeRow"></div>
-        </div>
+        <div class="settings-section"><div class="settings-section-label">THEME</div><div class="theme-grid" id="themeGrid"></div></div>
+        <div class="settings-section"><div class="settings-section-label">TEXT SIZE</div><div class="size-row" id="sizeRow"></div></div>
       </div>
     </div>
   </div>
 
-  <!-- ========== CONFIRM DIALOG ========== -->
   <div id="confirmDialog" style="display:none;">
     <div class="confirm-card">
       <div class="confirm-icon" id="confirmIcon">⚠️</div>
