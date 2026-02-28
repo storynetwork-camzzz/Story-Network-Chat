@@ -24,6 +24,24 @@ const WEEK_MS    = 7 * 24 * 60 * 60 * 1000;
 const CHANNELS   = ["general", "offtopic"];
 
 // ============================================================
+// FIX 1 — IMAGE PROXY (same technique as GT Color Converter)
+// Every image goes through images.weserv.nl so it loads on
+// all devices regardless of CORS / hotlink restrictions.
+// ============================================================
+function proxyImg(url) {
+  if (!url) return null;
+  if (url.startsWith("data:") || url.includes("images.weserv.nl")) return url;
+  const stripped = url.replace(/^https?:\/\//, "");
+  return "https://images.weserv.nl/?url=" + encodeURIComponent(stripped) + "&n=-1";
+}
+
+// ============================================================
+// FIX 4 — IMAGE URL DETECTION (for auto-embeds)
+// ============================================================
+const IMAGE_URL_RE = /^https?:\/\/\S+\.(?:jpg|jpeg|png|gif|webp|svg|bmp|avif)(\?[^\s]*)?$/i;
+function isImageUrl(url) { return IMAGE_URL_RE.test(url.trim()); }
+
+// ============================================================
 // STATE
 // ============================================================
 let currentUser    = null;
@@ -32,6 +50,7 @@ let myUsername     = "";
 let myColor        = "#1a8fff";
 let myAvatar       = null;
 let ownerUid       = null;
+let modUids        = {};   // FIX 3 — { uid: true, uid2: true, ... }
 let currentChannel = "general";
 let replyingTo     = null;
 let userScrolledUp = false;
@@ -81,19 +100,18 @@ function friendlyError(code) {
 // ============================================================
 function scrollToBottom(force) {
   const cb = $("chatbox");
-  if (force || !userScrolledUp) {
-    cb.scrollTop = cb.scrollHeight;
-  }
+  if (force || !userScrolledUp) cb.scrollTop = cb.scrollHeight;
 }
 
 // ============================================================
-// AVATAR BUILDER
+// AVATAR BUILDER  (FIX 1 — all avatars proxied through weserv)
 // ============================================================
 function buildAvatar(avatarUrl, username, color, size) {
   size = size || 36;
   if (avatarUrl) {
     const img = document.createElement("img");
-    img.src = avatarUrl; img.className = "av-img";
+    img.src = proxyImg(avatarUrl);
+    img.className = "av-img";
     img.style.cssText = `width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;display:block;flex-shrink:0;`;
     img.onerror = () => img.replaceWith(buildInitialAvatar(username, color, size));
     return img;
@@ -249,14 +267,20 @@ auth.onAuthStateChanged(async user => {
   myColor    = data.color    || "#4da6ff";
   myAvatar   = data.avatarUrl || null;
 
-  // Owner UID loaded securely from Firebase — never hardcoded in client
+  // Load owner UID from Firebase config
   db.ref("config/ownerUid").once("value", ownerSnap => {
     if (ownerSnap.val()) {
       ownerUid = ownerSnap.val();
     } else {
-      // No owner yet — first user to log in becomes owner
       db.ref("config/ownerUid").set(myUid).then(() => { ownerUid = myUid; updateSidebarUser(); });
     }
+    updateSidebarUser();
+  });
+
+  // FIX 3 — Live-listen to modUids so adding/removing mods takes effect immediately
+  // In Firebase Realtime DB set: config/modUids = { "UID_HERE": true, "UID2": true }
+  db.ref("config/modUids").on("value", modSnap => {
+    modUids = modSnap.val() || {};
     updateSidebarUser();
   });
 
@@ -273,6 +297,7 @@ $("logoutBtn").addEventListener("click", () => {
   setTyping(false);
   Object.values(msgListeners).forEach(({ ref: r, fn: f }) => { try { r.off("child_added", f); } catch(e){} });
   msgListeners = {};
+  db.ref("config/modUids").off("value");
   auth.signOut();
 });
 
@@ -304,7 +329,6 @@ function runLoadingBar() {
         $("loadingScreen").style.display = "none";
         $("appContainer").style.display = "flex";
         setupApp();
-        // Force scroll to bottom on initial load
         setTimeout(() => { userScrolledUp = false; scrollToBottom(true); }, 120);
       }, 200);
     }
@@ -327,7 +351,6 @@ function setupApp() {
   switchChannel("general");
   setupUnreadListeners();
 
-  // Single scroll listener — registered once here, never inside renderMessage
   $("chatbox").addEventListener("scroll", function() {
     const dist = this.scrollHeight - this.scrollTop - this.clientHeight;
     userScrolledUp = dist > 120;
@@ -337,17 +360,25 @@ function setupApp() {
 
 // ============================================================
 // SIDEBAR USER PANEL
+// FIX 2 — online list fills available space (CSS handles it;
+//          here we also remove the old max-height cap)
+// FIX 3 — sidebar shows Owner + Mod badges stacked
 // ============================================================
 function updateSidebarUser() {
   $("sidebarName").textContent = myUsername;
   $("sidebarName").style.color = myColor;
   const tagEl = $("sidebarTag");
-  if (ownerUid && myUid === ownerUid) {
-    tagEl.textContent = "[Owner]";
-    tagEl.style.color = "#ffffff";
-    tagEl.style.textShadow = "0 0 8px rgba(255,255,255,0.7)";
+  const tags = [];
+  if (ownerUid && myUid === ownerUid)
+    tags.push({ label:"[Owner]", color:"#ffffff", glow:"rgba(255,255,255,0.7)" });
+  if (modUids && modUids[myUid] === true)
+    tags.push({ label:"[Mod]", color:"#ff4d4d", glow:"rgba(255,77,77,0.7)" });
+  if (tags.length) {
+    tagEl.innerHTML = tags.map(t =>
+      `<span style="color:${t.color};text-shadow:0 0 8px ${t.glow};margin-right:4px;">${t.label}</span>`
+    ).join("");
   } else {
-    tagEl.textContent = "";
+    tagEl.innerHTML = "";
   }
   renderSidebarAvatar();
 }
@@ -357,8 +388,13 @@ function renderSidebarAvatar() {
   el.innerHTML = ""; el.style.background = "";
   if (myAvatar) {
     const img = document.createElement("img");
-    img.src = myAvatar; img.className = "av-img";
-    img.onerror = () => { el.innerHTML=""; el.textContent=myUsername.charAt(0).toUpperCase(); el.style.background=`linear-gradient(135deg,${myColor}cc,${myColor}66)`; };
+    img.src = proxyImg(myAvatar);   // FIX 1
+    img.className = "av-img";
+    img.onerror = () => {
+      el.innerHTML = "";
+      el.textContent = myUsername.charAt(0).toUpperCase();
+      el.style.background = `linear-gradient(135deg,${myColor}cc,${myColor}66)`;
+    };
     el.appendChild(img);
   } else {
     el.textContent = myUsername.charAt(0).toUpperCase();
@@ -421,13 +457,17 @@ function cleanupPresence() {
 function renderOnlineList(data) {
   const list = $("onlineList"); list.innerHTML = "";
   const entries = Object.entries(data);
-  if (!entries.length) { list.innerHTML='<div style="font-size:11px;color:var(--text-dim);padding:4px 8px;">Nobody online</div>'; return; }
+  if (!entries.length) {
+    list.innerHTML = '<div style="font-size:11px;color:var(--text-dim);padding:4px 8px;">Nobody online</div>';
+    return;
+  }
   entries.forEach(([uid, d]) => {
     const row = document.createElement("div"); row.className = "online-row";
     const av = buildAvatar(allUsersCache[uid]?.avatarUrl||null, d.username, d.color||"#4da6ff", 22);
     av.style.flexShrink = "0";
     const name = document.createElement("span"); name.className = "online-name";
-    name.textContent = d.username+(uid===myUid?" (you)":""); name.style.color = d.color||"#4da6ff";
+    name.textContent = d.username+(uid===myUid?" (you)":"");
+    name.style.color = d.color||"#4da6ff";
     const dot = document.createElement("span"); dot.className = "online-dot";
     row.appendChild(av); row.appendChild(name); row.appendChild(dot);
     list.appendChild(row);
@@ -489,53 +529,77 @@ function switchChannel(ch) {
 
 // ============================================================
 // LOAD MESSAGES
+// FIX 5 — pagination cursor is stored on the button itself
+//          so every click always uses the correct oldest ts
 // ============================================================
 function loadMessages(ch) {
   const baseRef = db.ref("messages/"+ch);
   baseRef.orderByChild("timestamp").limitToLast(PAGE_SIZE).once("value", snap => {
     if (currentChannel !== ch) return;
-    let msgs = []; let maxTs = 0;
-    snap.forEach(child => { msgs.push({ key: child.key, ...child.val() }); });
+    const msgs = [];
+    snap.forEach(child => msgs.push({ key: child.key, ...child.val() }));
+
+    if (!displayedMsgs[ch]) displayedMsgs[ch] = new Set();
     msgs.forEach(m => {
-      if (!displayedMsgs[ch]) displayedMsgs[ch] = new Set();
       if (displayedMsgs[ch].has(m.key)) return;
       displayedMsgs[ch].add(m.key);
       renderMessage(m, ch, false);
-      if ((m.timestamp||0) > maxTs) maxTs = m.timestamp||0;
     });
 
+    // "Load older" button — cursor stored on the element
     const loadBtn = document.createElement("button");
-    loadBtn.className="load-more-btn"; loadBtn.textContent="📜 Load older messages";
-    loadBtn.addEventListener("click", () => loadOlderMessages(ch, msgs[0]?.timestamp||0, loadBtn));
-    if ($("chatbox").firstChild) $("chatbox").insertBefore(loadBtn, $("chatbox").firstChild);
-    else $("chatbox").appendChild(loadBtn);
+    loadBtn.className = "load-more-btn";
+    loadBtn.textContent = "📜 Load older messages";
+    loadBtn.dataset.oldestTs = msgs.length ? String(msgs[0].timestamp || 0) : "0";
+    loadBtn.addEventListener("click", () => loadOlderMessages(ch, loadBtn));
+    const chatbox = $("chatbox");
+    if (chatbox.firstChild) chatbox.insertBefore(loadBtn, chatbox.firstChild);
+    else chatbox.appendChild(loadBtn);
 
-    // Force scroll to bottom after initial load
     setTimeout(() => scrollToBottom(true), 50);
 
-    const liveRef = baseRef.orderByChild("timestamp").startAt(maxTs+1);
+    // Live listener for new messages only
+    const maxTs = msgs.length ? (msgs[msgs.length - 1].timestamp || 0) : 0;
+    const liveRef = baseRef.orderByChild("timestamp").startAt(maxTs + 1);
     let ready = false;
     const fn = liveRef.on("child_added", snap2 => {
       if (!ready) return;
       if (currentChannel !== ch) return;
-      const key=snap2.key, data=snap2.val();
-      if (!displayedMsgs[ch]) displayedMsgs[ch]=new Set();
+      const key = snap2.key, data = snap2.val();
+      if (!displayedMsgs[ch]) displayedMsgs[ch] = new Set();
       if (displayedMsgs[ch].has(key)) return;
       displayedMsgs[ch].add(key);
       renderMessage({ key, ...data }, ch, true);
     });
-    setTimeout(() => { ready=true; }, 500);
+    setTimeout(() => { ready = true; }, 500);
     msgListeners[ch] = { ref: liveRef, fn };
     setupUnreadListeners();
   });
 }
 
-async function loadOlderMessages(ch, oldestTs, btn) {
-  btn.textContent="Loading..."; btn.disabled=true;
+// FIX 5 — reads & updates cursor from button.dataset so it
+//          always queries before the correct oldest message
+async function loadOlderMessages(ch, btn) {
+  const oldestTs = parseInt(btn.dataset.oldestTs || "0", 10);
+  if (!oldestTs) { btn.textContent = "No more messages"; btn.disabled = true; return; }
+
+  btn.textContent = "Loading..."; btn.disabled = true;
+
   const snap = await db.ref("messages/"+ch)
-    .orderByChild("timestamp").endAt(oldestTs-1).limitToLast(PAGE_SIZE).once("value");
-  let msgs=[]; snap.forEach(child => msgs.push({ key:child.key, ...child.val() }));
-  if (!msgs.length) { btn.textContent="No more messages"; return; }
+    .orderByChild("timestamp")
+    .endAt(oldestTs - 1)
+    .limitToLast(PAGE_SIZE)
+    .once("value");
+
+  const msgs = [];
+  snap.forEach(child => msgs.push({ key: child.key, ...child.val() }));
+
+  if (!msgs.length) {
+    btn.textContent = "No more messages";
+    btn.disabled = true;
+    return;
+  }
+
   const prevH = $("chatbox").scrollHeight;
   msgs.forEach(m => {
     if (displayedMsgs[ch].has(m.key)) return;
@@ -543,8 +607,17 @@ async function loadOlderMessages(ch, oldestTs, btn) {
     renderMessage(m, ch, false, true);
   });
   $("chatbox").scrollTop = $("chatbox").scrollHeight - prevH;
-  if (msgs.length < PAGE_SIZE) { btn.textContent="No more messages"; btn.disabled=true; }
-  else { btn.textContent="📜 Load older messages"; btn.disabled=false; btn.onclick=()=>loadOlderMessages(ch,msgs[0].timestamp||0,btn); }
+
+  // Update cursor to oldest message in this batch
+  btn.dataset.oldestTs = String(msgs[0].timestamp || 0);
+
+  if (msgs.length < PAGE_SIZE) {
+    btn.textContent = "No more messages";
+    btn.disabled = true;
+  } else {
+    btn.textContent = "📜 Load older messages";
+    btn.disabled = false;
+  }
 }
 
 // ============================================================
@@ -552,11 +625,11 @@ async function loadOlderMessages(ch, oldestTs, btn) {
 // ============================================================
 function setupUnreadListeners() {
   CHANNELS.forEach(ch => {
-    if (ch===currentChannel) return;
+    if (ch === currentChannel) return;
     db.ref("messages/"+ch).off("child_added");
     const since = Date.now();
     db.ref("messages/"+ch).orderByChild("timestamp").startAt(since).on("child_added", () => {
-      if (currentChannel!==ch) { const pip=$("pip-"+ch); if(pip) pip.style.display="inline-block"; }
+      if (currentChannel !== ch) { const pip=$("pip-"+ch); if(pip) pip.style.display="inline-block"; }
     });
   });
 }
@@ -576,17 +649,35 @@ $("scrollBtn").addEventListener("click", () => {
 function closeAllActionBars()   { document.querySelectorAll(".msg-action-bar.open").forEach(b => b.classList.remove("open")); }
 function closeAllEmojiPickers() { document.querySelectorAll(".emoji-popup").forEach(p => p.remove()); }
 
-// Global click — close action bars and emoji pickers when clicking outside messages
 document.addEventListener("click", e => {
-  if (!e.target.closest(".message")) {
-    closeAllActionBars();
-    closeAllEmojiPickers();
-  }
+  if (!e.target.closest(".message")) { closeAllActionBars(); closeAllEmojiPickers(); }
   if (e.target !== $("msgInput")) $("mentionDrop").style.display="none";
 });
 
 // ============================================================
+// FIX 3 — Delete button factory (reused for owner & mod)
+// ============================================================
+function makeDeleteBtn(key, ch) {
+  const delBtn = document.createElement("button");
+  delBtn.className = "msg-action-btn delete-btn";
+  delBtn.textContent = "🗑 Delete";
+  delBtn.addEventListener("click", async e => {
+    e.stopPropagation();
+    closeAllActionBars();
+    const ok = await showConfirm("🗑️","Delete Message","This will delete the message for everyone.");
+    if (ok) {
+      db.ref("messages/"+ch+"/"+key).remove()
+        .catch(err => showToast("Delete failed: "+err.message,"err"));
+    }
+  });
+  return delBtn;
+}
+
+// ============================================================
 // RENDER MESSAGE
+// FIX 1 — all images proxied through weserv
+// FIX 3 — owner (white) + mod (red) badges, stackable
+// FIX 4 — image URL embeds
 // ============================================================
 function renderMessage(data, ch, isNew, prepend) {
   prepend = prepend || false;
@@ -595,13 +686,14 @@ function renderMessage(data, ch, isNew, prepend) {
   const isMine     = userId === myUid;
   const nameColor  = color || "#ffffff";
   const isOwnerMsg = ownerUid && userId === ownerUid;
-  const imOwner    = ownerUid && myUid === ownerUid;
+  const isModMsg   = modUids && modUids[userId] === true;
+  const canDelete  = (ownerUid && myUid === ownerUid) || (modUids && modUids[myUid] === true);
 
   const wrapper = document.createElement("div");
   wrapper.className = "msg-wrapper "+(isMine?"mine":"other");
   wrapper.dataset.messageId = key;
 
-  const avEl = buildAvatar(avatarUrl||null, name, nameColor, 34);
+  const avEl = buildAvatar(avatarUrl||null, name, nameColor, 34);  // FIX 1
   avEl.className = "msg-avatar";
 
   const bubble = document.createElement("div");
@@ -610,7 +702,7 @@ function renderMessage(data, ch, isNew, prepend) {
   bubble.dataset.channel   = ch;
   if (message && message.includes("@"+myUsername)) bubble.classList.add("mentioned");
 
-  // ── 1) Reply quote — always topmost ──
+  // ── 1) Reply quote ──
   if (replyTo) {
     const q = document.createElement("div"); q.className="reply-quote";
     const qName = document.createElement("span"); qName.className="reply-quote-name"; qName.textContent=replyTo.name;
@@ -620,28 +712,28 @@ function renderMessage(data, ch, isNew, prepend) {
     bubble.appendChild(q);
   }
 
-// ── 2) Name row — badge (if owner) + username + time ──
-  const header = document.createElement("div"); header.className="msg-header";
+  // ── 2) Name row — FIX 3: owner badge (white) + mod badge (red), stackable ──
+  const header   = document.createElement("div"); header.className="msg-header";
   const nameWrap = document.createElement("span"); nameWrap.className="msg-name-wrap";
 
-  // ADD THE BADGE FIRST (Left side)
   if (isOwnerMsg) {
-    const badge = document.createElement("span"); 
+    const badge = document.createElement("span");
     badge.className = "owner-badge";
     badge.textContent = "[Owner]";
-    badge.style.color = "#ffffff";
-    badge.style.textShadow = "0 0 8px rgba(255,255,255,0.7)";
-    
-    // Switch to margin-right to push the name away from the badge
-    badge.style.marginRight = "6px"; 
-    
+    badge.style.cssText = "color:#ffffff;text-shadow:0 0 8px rgba(255,255,255,0.7);margin-right:4px;";
+    nameWrap.appendChild(badge);
+  }
+  if (isModMsg) {
+    const badge = document.createElement("span");
+    badge.className = "mod-badge";
+    badge.textContent = "[Mod]";
+    badge.style.cssText = "color:#ff4d4d;text-shadow:0 0 8px rgba(255,77,77,0.7);margin-right:4px;";
     nameWrap.appendChild(badge);
   }
 
-  // ADD THE USERNAME SECOND (Right side)
-  const uname = document.createElement("span"); 
+  const uname = document.createElement("span");
   uname.className = "msg-username";
-  uname.textContent = name; 
+  uname.textContent = name;
   uname.style.color = nameColor;
   nameWrap.appendChild(uname);
 
@@ -650,34 +742,48 @@ function renderMessage(data, ch, isNew, prepend) {
   header.appendChild(mtime);
   bubble.appendChild(header);
 
-  // ── 3) Message content ──
+  // ── 3) Message content — FIX 1 proxy + FIX 4 URL embeds ──
   const textEl = document.createElement("div"); textEl.className="msg-text";
+
   if (data.type==="image" && data.imageUrl) {
+    // Uploaded image — proxy it (FIX 1)
+    const displayUrl = proxyImg(data.imageUrl);
     if (data.imageSpoiler) {
       const sw = document.createElement("div"); sw.className="img-spoiler";
-      const si = document.createElement("img"); si.src=data.imageUrl; si.className="msg-image";
+      const si = document.createElement("img"); si.src=displayUrl; si.className="msg-image";
       const sl = document.createElement("div"); sl.className="img-spoiler-label"; sl.innerHTML="👁 Click to reveal image";
       sw.appendChild(si); sw.appendChild(sl);
-      // Scroll down when spoiler image loads
       si.addEventListener("load", () => { if (!userScrolledUp) scrollToBottom(true); });
       sw.addEventListener("click", e => {
         e.stopPropagation();
         sw.classList.add("revealed");
-        // Scroll down after reveal
         requestAnimationFrame(() => { if (!userScrolledUp) scrollToBottom(true); });
-        si.onclick = ev => { ev.stopPropagation(); openLightbox(data.imageUrl); };
+        si.onclick = ev => { ev.stopPropagation(); openLightbox(displayUrl); };
       });
       textEl.appendChild(sw);
     } else {
       const img = document.createElement("img");
-      img.src=data.imageUrl; img.className="msg-image"; img.alt="Image";
-      // Scroll down when image finishes loading
+      img.src = displayUrl; img.className="msg-image"; img.alt="Image";
       img.addEventListener("load", () => { if (!userScrolledUp) scrollToBottom(true); });
-      img.addEventListener("click", e => { e.stopPropagation(); openLightbox(data.imageUrl); });
+      img.addEventListener("click", e => { e.stopPropagation(); openLightbox(displayUrl); });
       textEl.appendChild(img);
     }
   } else {
-    textEl.innerHTML = parseMessage(message||"");
+    // Text message — detect image URL embeds (FIX 4)
+    const raw = message || "";
+    const trimmed = raw.trim();
+    if (isImageUrl(trimmed)) {
+      // Whole message is an image URL — embed it, proxied
+      const proxied = proxyImg(trimmed);
+      const img = document.createElement("img");
+      img.src = proxied; img.className="msg-image"; img.alt="Image";
+      img.addEventListener("load", () => { if (!userScrolledUp) scrollToBottom(true); });
+      img.addEventListener("click", e => { e.stopPropagation(); openLightbox(proxied); });
+      textEl.appendChild(img);
+    } else {
+      // Normal formatted text
+      textEl.innerHTML = parseMessage(raw);
+    }
   }
   bubble.appendChild(textEl);
 
@@ -685,11 +791,11 @@ function renderMessage(data, ch, isNew, prepend) {
   const reactionsEl = document.createElement("div"); reactionsEl.className="reactions";
   bubble.appendChild(reactionsEl);
 
-  // ── 5) Action bar — click-only, never hover ──
+  // ── 5) Action bar ──
   const actionBar = document.createElement("div"); actionBar.className="msg-action-bar";
 
   const replyBtn = document.createElement("button"); replyBtn.className="msg-action-btn";
-  replyBtn.textContent="↩ Reply";
+  replyBtn.textContent = "↩ Reply";
   replyBtn.addEventListener("click", e => {
     e.stopPropagation();
     setReply(key, name, message||"");
@@ -698,39 +804,26 @@ function renderMessage(data, ch, isNew, prepend) {
   actionBar.appendChild(replyBtn);
 
   const reactBtn = document.createElement("button"); reactBtn.className="msg-action-btn";
-  reactBtn.textContent="😀 React";
+  reactBtn.textContent = "😀 React";
   reactBtn.addEventListener("click", e => {
     e.stopPropagation();
     openEmojiPicker(key, ch, reactBtn);
   });
   actionBar.appendChild(reactBtn);
 
-  // Delete — only for owner
-  if (imOwner) {
-    const delBtn = document.createElement("button"); delBtn.className="msg-action-btn delete-btn";
-    delBtn.textContent="🗑 Delete";
-    delBtn.addEventListener("click", async e => {
-      e.stopPropagation();
-      closeAllActionBars();
-      const ok = await showConfirm("🗑️","Delete Message","This will delete the message for everyone.");
-      if (ok) {
-        db.ref("messages/"+ch+"/"+key).remove()
-          .catch(err => showToast("Delete failed: "+err.message,"err"));
-      }
-    });
-    actionBar.appendChild(delBtn);
+  // FIX 3 — delete for owner OR mod
+  if (canDelete) {
+    actionBar.appendChild(makeDeleteBtn(key, ch));
   }
 
   bubble.appendChild(actionBar);
 
-  // Click bubble → toggle action bar; scroll down if needed after it expands
   bubble.addEventListener("click", e => {
     const isOpen = actionBar.classList.contains("open");
     closeAllActionBars();
     closeAllEmojiPickers();
     if (!isOpen) {
       actionBar.classList.add("open");
-      // Keep user at bottom if they were already there
       requestAnimationFrame(() => { if (!userScrolledUp) scrollToBottom(true); });
     }
     e.stopPropagation();
@@ -748,7 +841,7 @@ function renderMessage(data, ch, isNew, prepend) {
     chatbox.appendChild(wrapper);
   }
 
-  // Live delete — removes wrapper for everyone when Firebase record is gone
+  // Live delete
   db.ref("messages/"+ch+"/"+key).on("value", snap => {
     if (!snap.exists()) wrapper.remove();
   });
@@ -758,10 +851,8 @@ function renderMessage(data, ch, isNew, prepend) {
     renderReactions(reactionsEl, snap.val()||{}, key, ch);
   });
 
-  // Scroll behaviour for new incoming messages
   if (isNew) {
     if (!userScrolledUp) {
-      // Use rAF so the DOM has painted the new bubble before measuring height
       requestAnimationFrame(() => scrollToBottom(true));
     } else {
       $("scrollBtn").style.display = "flex";
@@ -774,8 +865,6 @@ function renderMessage(data, ch, isNew, prepend) {
 // ============================================================
 function openEmojiPicker(msgId, ch, anchor) {
   closeAllEmojiPickers();
-
-  // Only emojis that render reliably cross-platform
   const EMOJI_ROWS = [
     ["👍","👎","❤️","😂","😮","😢","😡","🎉","🔥","💯"],
     ["✅","❌","⭐","💀","👀","🙏","😀","😎","🤔","😴"],
@@ -783,50 +872,30 @@ function openEmojiPicker(msgId, ch, anchor) {
     ["🐧","🎮","💅","🫡","🥶","🥵","😈","👾","🤩","😏"],
     ["🫀","🧠","👁","🫶","🤝","✌️","🤌","🤰","🧌","🫃"],
   ];
-
-  const popup = document.createElement("div");
-  popup.className = "emoji-popup";
-
+  const popup = document.createElement("div"); popup.className = "emoji-popup";
   EMOJI_ROWS.forEach(row => {
     const rowEl = document.createElement("div"); rowEl.className="emoji-row";
     row.forEach(emoji => {
       const btn = document.createElement("button"); btn.className="emoji-btn";
       btn.textContent = emoji;
-      btn.addEventListener("click", e => {
-        e.stopPropagation();
-        toggleReaction(msgId, ch, emoji);
-        popup.remove();
-      });
+      btn.addEventListener("click", e => { e.stopPropagation(); toggleReaction(msgId, ch, emoji); popup.remove(); });
       rowEl.appendChild(btn);
     });
     popup.appendChild(rowEl);
   });
-
   document.body.appendChild(popup);
-
-  // Measure after appending
-  const pw = popup.offsetWidth  || 340;
-  const ph = popup.offsetHeight || 210;
-  const rect = anchor.getBoundingClientRect();
-  const vw = window.innerWidth, vh = window.innerHeight;
-
-  let top  = rect.top - ph - 8;
-  let left = rect.left + rect.width/2 - pw/2;
-
-  if (top < 8)          top  = rect.bottom + 8;
-  if (top + ph > vh-8)  top  = vh - ph - 8;
-  if (left < 8)         left = 8;
-  if (left + pw > vw-8) left = vw - pw - 8;
-
-  popup.style.top  = top  + "px";
-  popup.style.left = left + "px";
-
+  const pw=popup.offsetWidth||340, ph=popup.offsetHeight||210;
+  const rect=anchor.getBoundingClientRect();
+  const vw=window.innerWidth, vh=window.innerHeight;
+  let top=rect.top-ph-8, left=rect.left+rect.width/2-pw/2;
+  if (top<8)        top=rect.bottom+8;
+  if (top+ph>vh-8)  top=vh-ph-8;
+  if (left<8)       left=8;
+  if (left+pw>vw-8) left=vw-pw-8;
+  popup.style.top=top+"px"; popup.style.left=left+"px";
   setTimeout(() => {
     document.addEventListener("click", function closePopup(e) {
-      if (!popup.contains(e.target)) {
-        popup.remove();
-        document.removeEventListener("click", closePopup);
-      }
+      if (!popup.contains(e.target)) { popup.remove(); document.removeEventListener("click", closePopup); }
     });
   }, 10);
 }
@@ -935,31 +1004,21 @@ function setupAttachButton() {
   const btn  = $("attachBtn");
   const menu = $("attachMenu");
   let menuOpen = false;
-
-  btn.addEventListener("click", e => {
-    e.stopPropagation();
-    menuOpen = !menuOpen;
-    menu.style.display = menuOpen ? "block" : "none";
-  });
+  btn.addEventListener("click", e => { e.stopPropagation(); menuOpen=!menuOpen; menu.style.display=menuOpen?"block":"none"; });
   document.addEventListener("click", () => { menu.style.display="none"; menuOpen=false; });
   menu.addEventListener("click", e => e.stopPropagation());
 
   $("attachMediaBtn").addEventListener("click", () => {
     menu.style.display="none"; menuOpen=false;
-    $("mediaInput").dataset.spoiler="false";
-    $("mediaInput").click();
+    $("mediaInput").dataset.spoiler="false"; $("mediaInput").click();
   });
-
-  // SPOILER: set flag BEFORE opening file picker
   $("attachSpoilerBtn").addEventListener("click", () => {
     menu.style.display="none"; menuOpen=false;
-    $("mediaInput").dataset.spoiler="true";
-    $("mediaInput").click();
+    $("mediaInput").dataset.spoiler="true"; $("mediaInput").click();
   });
-
   $("mediaInput").addEventListener("change", async () => {
     const file      = $("mediaInput").files[0];
-    const isSpoiler = $("mediaInput").dataset.spoiler === "true"; // read BEFORE clearing
+    const isSpoiler = $("mediaInput").dataset.spoiler === "true";
     if (!file) return;
     $("mediaInput").value="";
     if (file.size > 5*1024*1024) return showToast("Image must be under 5MB","err");
@@ -968,7 +1027,6 @@ function setupAttachButton() {
     if (!url) return showToast("Upload failed","err");
     sendImageMessage(url, isSpoiler);
   });
-
   $("attachLinkBtn").addEventListener("click", () => {
     menu.style.display="none"; menuOpen=false;
     const url = prompt("Enter a URL to share:");
@@ -982,11 +1040,10 @@ function setupAttachButton() {
 function sendImageMessage(imageUrl, isSpoiler) {
   const now = Date.now();
   db.ref("messages/"+currentChannel).push({
-    name: myUsername, message: "", imageUrl,
-    imageSpoiler: isSpoiler === true,
+    name:myUsername, message:"", imageUrl,
+    imageSpoiler: isSpoiler===true,
     time: new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),
-    timestamp: now, color: myColor, userId: myUid,
-    avatarUrl: myAvatar||null, type:"image"
+    timestamp:now, color:myColor, userId:myUid, avatarUrl:myAvatar||null, type:"image"
   });
   db.ref("users/"+myUid).update({ username:myUsername, color:myColor, avatarUrl:myAvatar||null });
 }
@@ -994,13 +1051,14 @@ function sendImageMessage(imageUrl, isSpoiler) {
 function sendLinkMessage(url) {
   const now = Date.now();
   db.ref("messages/"+currentChannel).push({
-    name: myUsername, message: url,
+    name:myUsername, message:url,
     time: new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),
-    timestamp: now, color: myColor, userId: myUid, avatarUrl: myAvatar||null
+    timestamp:now, color:myColor, userId:myUid, avatarUrl:myAvatar||null
   });
   db.ref("users/"+myUid).update({ username:myUsername, color:myColor, avatarUrl:myAvatar||null });
 }
 
+// FIX 1 — lightbox always uses proxied URL
 function openLightbox(src) {
   let lb = $("lightbox");
   if (!lb) {
@@ -1008,7 +1066,7 @@ function openLightbox(src) {
     lb.addEventListener("click", () => lb.remove());
     document.body.appendChild(lb);
   }
-  lb.innerHTML = `<img src="${src}" alt="Image">`;
+  lb.innerHTML = `<img src="${proxyImg(src)}" alt="Image">`;
   lb.style.display = "flex";
 }
 
@@ -1075,9 +1133,9 @@ function sendMessage() {
   const capturedReply = replyingTo; clearReply();
 
   const msgData = {
-    name: myUsername, message: raw,
+    name:myUsername, message:raw,
     time: new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),
-    timestamp: now, color: myColor, userId: myUid, avatarUrl: myAvatar||null
+    timestamp:now, color:myColor, userId:myUid, avatarUrl:myAvatar||null
   };
   if (capturedReply) msgData.replyTo = { msgId:capturedReply.msgId, name:capturedReply.name, text:capturedReply.text };
 
@@ -1124,7 +1182,6 @@ function setupSettings() {
 }
 
 function setMsg(el,text,ok){ el.textContent=text; el.className="settings-msg "+(ok?"ok":"bad"); }
-
 function openSettings() {
   $("settingsOverlay").style.display="flex";
   $("newUsernameInput").value=myUsername;
@@ -1149,7 +1206,7 @@ async function checkUsernameCooldown() {
 }
 
 // ============================================================
-// THEMES  (Story Network theme updated to match reference site)
+// THEMES
 // ============================================================
 const THEMES = {
   "Story Network": {
