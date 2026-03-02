@@ -15,14 +15,23 @@
 </head>
 <body>
 
+  <!-- ========== BAN SCREEN ========== -->
+  <div id="banScreen" style="display:none;">
+    <div class="ban-inner">
+      <div class="ban-icon">🔨</div>
+      <h2>You have been banned</h2>
+      <p id="banReason" class="ban-reason"></p>
+      <p class="ban-by">Banned by <span id="banBy"></span></p>
+      <button onclick="firebase.auth().signOut()" class="auth-btn primary" style="margin-top:24px;width:200px;">Sign Out</button>
+    </div>
+  </div>
+
   <!-- ========== AUTH SCREEN ========== -->
   <div id="authScreen">
     <div class="auth-bg">
       <div class="auth-grid"></div>
       <div class="auth-glow"></div>
     </div>
-
-    <!-- LOGIN CARD -->
     <div class="auth-card" id="loginCard">
       <div class="auth-logo">
         <img src="https://codehs.com/uploads/b9084e2547f1923caa433b97f16c89d1" alt="Story Network">
@@ -45,8 +54,6 @@
       <button id="loginBtn" class="auth-btn primary">Sign In</button>
       <p class="auth-switch">No account? <a id="showSignupBtn" href="#">Create one</a></p>
     </div>
-
-    <!-- SIGNUP CARD -->
     <div class="auth-card" id="signupCard" style="display:none;">
       <div class="auth-logo">
         <img src="https://codehs.com/uploads/b9084e2547f1923caa433b97f16c89d1" alt="Story Network">
@@ -95,8 +102,24 @@
         <span class="sidebar-title">Story Network Chat</span>
       </div>
 
+      <!-- IMPORTANT -->
       <div class="sidebar-section">
-        <div class="sidebar-label">CHANNELS</div>
+        <div class="sidebar-label">📌 IMPORTANT</div>
+        <button class="channel-btn" data-channel="announcements">
+          <span class="ch-hash">📢</span>
+          <span class="ch-name">announcements</span>
+          <span class="unread-pip" id="pip-announcements" style="display:none;"></span>
+        </button>
+        <button class="channel-btn" data-channel="leaderboard">
+          <span class="ch-hash">🏆</span>
+          <span class="ch-name">leaderboard</span>
+          <span class="unread-pip" id="pip-leaderboard" style="display:none;"></span>
+        </button>
+      </div>
+
+      <!-- GENERAL -->
+      <div class="sidebar-section">
+        <div class="sidebar-label">💬 GENERAL</div>
         <button class="channel-btn selected" data-channel="general">
           <span class="ch-hash">#</span>
           <span class="ch-name">general</span>
@@ -109,8 +132,26 @@
         </button>
       </div>
 
+      <!-- MOD -->
+      <div class="sidebar-section" id="modSection" style="display:none;">
+        <div class="sidebar-label">🛡️ MOD</div>
+        <button class="channel-btn" data-channel="modchat" id="modChatBtn">
+          <span class="ch-hash">🛡️</span>
+          <span class="ch-name">mod-chat</span>
+          <span class="unread-pip" id="pip-modchat" style="display:none;"></span>
+        </button>
+      </div>
+
+      <!-- FRIENDS -->
       <div class="sidebar-section">
-        <div class="sidebar-label">ONLINE — <span id="onlineCount">0</span></div>
+        <div class="sidebar-label">👥 FRIENDS <span id="friendRequestBadge" class="req-badge" style="display:none;">0</span></div>
+        <div id="friendRequestsList"></div>
+        <div id="friendsList"><div class="no-friends-msg">No friends yet!</div></div>
+      </div>
+
+      <!-- ONLINE -->
+      <div class="sidebar-section">
+        <div class="sidebar-label">🟢 ONLINE — <span id="onlineCount">0</span></div>
         <div id="onlineList"></div>
       </div>
 
@@ -138,6 +179,13 @@
       <div id="chatHeader">
         <span class="ch-hash" style="font-size:18px;">#</span>
         <span id="channelLabel">general</span>
+        <div class="header-right">
+          <div id="searchBar" style="display:none;">
+            <input id="searchInput" type="text" placeholder="Search messages..." autocomplete="off">
+            <button id="searchClear" class="icon-btn">✕</button>
+          </div>
+          <button id="searchToggleBtn" class="icon-btn" title="Search messages">🔍</button>
+        </div>
       </div>
 
       <div id="chatbox"></div>
@@ -148,7 +196,10 @@
         <div id="typingDisplay" class="typing-display"></div>
       </div>
 
-      <!-- REPLY BAR -->
+      <div id="muteNotice" style="display:none;">
+        <span>🔇 You are muted until <strong id="muteUntilTime"></strong></span>
+      </div>
+
       <div id="replyBar" style="display:none;">
         <span class="reply-icon">↩</span>
         <span>Replying to <strong id="replyName"></strong></span>
@@ -156,7 +207,6 @@
         <button id="cancelReply">✕</button>
       </div>
 
-      <!-- FORMAT TOOLBAR -->
       <div id="formatToolbar">
         <button class="fmt-btn" data-fmt="bold" title="Bold"><b>B</b></button>
         <button class="fmt-btn" data-fmt="italic" title="Italic"><i>I</i></button>
@@ -177,7 +227,6 @@
         <button class="fmt-btn spoiler-btn" data-fmt="spoiler" title="Spoiler">👁 Spoiler</button>
       </div>
 
-      <!-- INPUT ROW -->
       <div id="inputRow">
         <div id="mentionDrop" style="display:none;"></div>
         <div id="attachMenu" style="display:none;">
@@ -190,6 +239,111 @@
         <textarea id="msgInput" placeholder="Message #general" maxlength="250" rows="1"></textarea>
         <span class="char-counter" id="charCounter">0/250</span>
         <button id="sendBtn">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== PROFILE MODAL ========== -->
+  <div id="profileModal" style="display:none;">
+    <div class="profile-card">
+      <button class="profile-close" id="profileClose">✕</button>
+      <div class="profile-header">
+        <div class="profile-avatar-wrap" id="profileAvatar"></div>
+        <div class="profile-info">
+          <div class="profile-name" id="profileName"></div>
+          <div class="profile-badges" id="profileBadges"></div>
+          <div class="profile-status" id="profileStatus"></div>
+        </div>
+      </div>
+      <div class="profile-stats">
+        <div class="profile-stat">
+          <span class="stat-value" id="profileMsgCount">0</span>
+          <span class="stat-label">Messages</span>
+        </div>
+        <div class="profile-stat">
+          <span class="stat-value" id="profileRep">0</span>
+          <span class="stat-label">Rep ⭐</span>
+        </div>
+        <div class="profile-stat">
+          <span class="stat-value" id="profileFriendCount">0</span>
+          <span class="stat-label">Friends</span>
+        </div>
+      </div>
+      <div class="profile-joined">📅 Joined: <span id="profileJoined"></span></div>
+      <div class="profile-actions" id="profileActions"></div>
+      <div class="profile-warns" id="profileWarns" style="display:none;">
+        <div class="warns-label">⚠️ Warning History</div>
+        <div id="warnsList"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== POLL MODAL ========== -->
+  <div id="pollModal" style="display:none;">
+    <div class="poll-card">
+      <div class="poll-header">
+        <h3>📊 Create Poll</h3>
+        <button id="pollClose" class="close-btn">✕</button>
+      </div>
+      <div class="poll-body">
+        <div class="poll-field">
+          <label>Question</label>
+          <input id="pollQuestion" type="text" placeholder="Ask something..." maxlength="120" class="settings-input" style="width:100%;">
+        </div>
+        <div class="poll-field">
+          <label>Options</label>
+          <div id="pollOptions">
+            <input class="poll-option-input settings-input" type="text" placeholder="Option 1" maxlength="60">
+            <input class="poll-option-input settings-input" type="text" placeholder="Option 2" maxlength="60">
+          </div>
+          <button id="addPollOption" class="add-option-btn">+ Add Option</button>
+        </div>
+        <div class="poll-field">
+          <label>Duration</label>
+          <div class="poll-duration-row">
+            <button class="poll-dur-btn active" data-dur="3600000">1h</button>
+            <button class="poll-dur-btn" data-dur="21600000">6h</button>
+            <button class="poll-dur-btn" data-dur="86400000">24h</button>
+            <button class="poll-dur-btn" data-dur="604800000">7d</button>
+          </div>
+        </div>
+      </div>
+      <div class="poll-footer">
+        <button id="pollCancel" class="confirm-btn cancel">Cancel</button>
+        <button id="pollPost" class="confirm-btn ok">Post Poll</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== MUTE PICKER MODAL ========== -->
+  <div id="muteModal" style="display:none;">
+    <div class="confirm-card">
+      <div class="confirm-icon">🔇</div>
+      <h3 id="muteModalTitle">Mute User</h3>
+      <p>Select mute duration:</p>
+      <div class="mute-duration-row">
+        <button class="mute-dur-btn" data-dur="300000">5m</button>
+        <button class="mute-dur-btn" data-dur="600000">10m</button>
+        <button class="mute-dur-btn" data-dur="1800000">30m</button>
+        <button class="mute-dur-btn" data-dur="3600000">1h</button>
+        <button class="mute-dur-btn" data-dur="86400000">24h</button>
+      </div>
+      <div class="confirm-btns" style="margin-top:14px;">
+        <button id="muteCancel" class="confirm-btn cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== NICKNAME MODAL ========== -->
+  <div id="nicknameModal" style="display:none;">
+    <div class="confirm-card">
+      <div class="confirm-icon">✏️</div>
+      <h3>Set Nickname</h3>
+      <p>Only you can see this nickname</p>
+      <input id="nicknameInput" type="text" class="settings-input" placeholder="Leave blank to clear" maxlength="24" style="margin:12px 0;width:100%;">
+      <div class="confirm-btns">
+        <button id="nicknameCancel" class="confirm-btn cancel">Cancel</button>
+        <button id="nicknameSave" class="confirm-btn ok">Save</button>
       </div>
     </div>
   </div>
@@ -210,6 +364,15 @@
             <button id="saveUsernameBtn" class="settings-save-btn">Save</button>
           </div>
           <p id="usernameChangeMsg" class="settings-msg"></p>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section-label">STATUS</div>
+          <p class="settings-desc">Set a custom status visible on your profile</p>
+          <div class="settings-row">
+            <input id="statusInput" class="settings-input" placeholder="What's on your mind?" maxlength="40">
+            <button id="saveStatusBtn" class="settings-save-btn">Save</button>
+          </div>
+          <p id="statusMsg" class="settings-msg"></p>
         </div>
         <div class="settings-section">
           <div class="settings-section-label">USERNAME COLOR</div>
