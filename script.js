@@ -305,6 +305,16 @@ auth.onAuthStateChanged(async user => {
   db.ref("config/mods").on("value", snap => { modUids = snap.val() || {}; updateSidebarUser(); });
   db.ref("config/devs").on("value", snap => { devUids = snap.val() || {}; updateSidebarUser(); });
   db.ref("config/muted").on("value", snap => { mutedUids = snap.val() || {}; checkMuteStatus(); });
+  db.ref("config/banned/"+myUid).on("value", snap => {
+    if (!snap.exists()) return;
+    const banData = snap.val();
+    $("appContainer").style.display = "none";
+    $("loadingScreen").style.display = "none";
+    $("authScreen").style.display = "none";
+    $("banScreen").style.display = "flex";
+    $("banReason").textContent = banData.reason || "No reason given.";
+    $("banBy").textContent = banData.by || "a moderator";
+  });
 
   // Check for pending warns notification
   checkPendingWarnNotification();
@@ -599,8 +609,9 @@ function setupPresence() {
     ref.onDisconnect().remove();
     ref.set({ username: myUsername, color: myColor, uid: myUid });
     // Track last seen date for leaderboard
-    const today = new Date().toISOString().split("T")[0];
-    db.ref("users/"+myUid+"/activeDays/"+today.replace(/-/g,"_")).set(true);
+    const now = new Date();
+const today = now.getFullYear()+"_"+(now.getMonth()+1).toString().padStart(2,"0")+"_"+now.getDate().toString().padStart(2,"0");
+db.ref("users/"+myUid+"/activeDays/"+today).set(true);
   });
 }
 
@@ -696,7 +707,17 @@ function renderFriendsList() {
       dot.className = isOnline ? "online-dot" : "offline-dot";
       const nicknameBtn = document.createElement("button"); nicknameBtn.className="nickname-btn"; nicknameBtn.title="Set nickname"; nicknameBtn.textContent="✏️";
       nicknameBtn.addEventListener("click", e => { e.stopPropagation(); openNicknameModal(friendUid, friendData.nickname||""); });
-      row.appendChild(av); row.appendChild(nameEl); row.appendChild(dot); row.appendChild(nicknameBtn);
+      const removeBtn = document.createElement("button"); removeBtn.className="nickname-btn"; removeBtn.title="Remove friend"; removeBtn.textContent="❌";
+      removeBtn.style.marginLeft="2px";
+      removeBtn.addEventListener("click", async e => {
+        e.stopPropagation();
+        const ok = await showConfirm("❌","Remove Friend","Remove "+displayName+" from your friends?");
+        if (!ok) return;
+        await db.ref("users/"+myUid+"/friends/"+friendUid).remove();
+        await db.ref("users/"+friendUid+"/friends/"+myUid).remove();
+        showToast("Removed "+displayName+" from friends","ok");
+      });
+      row.appendChild(av); row.appendChild(nameEl); row.appendChild(dot); row.appendChild(nicknameBtn); row.appendChild(removeBtn);
       row.addEventListener("click", () => openProfile(friendUid));
       list.appendChild(row);
     });
@@ -780,18 +801,56 @@ async function openProfile(targetUid) {
     if (canModerate() && !isOwner(targetUid)) {
       const warnBtn = document.createElement("button"); warnBtn.className="profile-action-btn warn-btn";
       warnBtn.textContent = "⚠️ Warn";
-      warnBtn.addEventListener("click", () => warnUser(targetUid, username));
+      warnBtn.addEventListener("click", async () => {
+        await warnUser(targetUid, username);
+        $("profileModal").style.display = "none";
+        openProfile(targetUid);
+      });
       actionsEl.appendChild(warnBtn);
 
-      const muteBtn = document.createElement("button"); muteBtn.className="profile-action-btn mute-btn";
-      muteBtn.textContent = isMuted(targetUid) ? "🔇 Muted" : "🔇 Mute";
-      muteBtn.addEventListener("click", () => muteUser(targetUid, username));
-      actionsEl.appendChild(muteBtn);
+      if (isMuted(targetUid)) {
+        const unmuteBtn = document.createElement("button"); unmuteBtn.className="profile-action-btn mute-btn";
+        unmuteBtn.textContent = "🔊 Unmute";
+        unmuteBtn.addEventListener("click", async () => {
+          await db.ref("config/muted/"+targetUid).remove();
+          showToast("🔊 "+username+" has been unmuted","ok");
+          $("profileModal").style.display = "none";
+        });
+        actionsEl.appendChild(unmuteBtn);
+      } else {
+        const muteBtn = document.createElement("button"); muteBtn.className="profile-action-btn mute-btn";
+        muteBtn.textContent = "🔇 Mute";
+        muteBtn.addEventListener("click", async () => {
+          await muteUser(targetUid, username);
+          $("profileModal").style.display = "none";
+          openProfile(targetUid);
+        });
+        actionsEl.appendChild(muteBtn);
+      }
 
-      const banBtn = document.createElement("button"); banBtn.className="profile-action-btn ban-btn";
-      banBtn.textContent = "🔨 Ban";
-      banBtn.addEventListener("click", () => banUser(targetUid, username));
-      actionsEl.appendChild(banBtn);
+      const isBanned = await db.ref("config/banned/"+targetUid).once("value");
+      if (isBanned.exists()) {
+        const unbanBtn = document.createElement("button"); unbanBtn.className="profile-action-btn ban-btn";
+        unbanBtn.textContent = "✅ Unban";
+        unbanBtn.style.borderColor = "#57f287"; unbanBtn.style.color = "#57f287";
+        unbanBtn.addEventListener("click", async () => {
+          const ok = await showConfirm("✅","Unban "+username,"This will restore their access to the chat.");
+          if (!ok) return;
+          await db.ref("config/banned/"+targetUid).remove();
+          showToast("✅ "+username+" has been unbanned","ok");
+          $("profileModal").style.display = "none";
+        });
+        actionsEl.appendChild(unbanBtn);
+      } else {
+        const banBtn = document.createElement("button"); banBtn.className="profile-action-btn ban-btn";
+        banBtn.textContent = "🔨 Ban";
+        banBtn.addEventListener("click", async () => {
+          await banUser(targetUid, username);
+          $("profileModal").style.display = "none";
+          openProfile(targetUid);
+        });
+        actionsEl.appendChild(banBtn);
+      }
     }
   }
 
@@ -804,11 +863,19 @@ async function openProfile(targetUid) {
     if (warnsSnap.exists()) {
       warnsSection.style.display = "";
       const warns = warnsSnap.val();
-      Object.values(warns).sort((a,b)=>b.at-a.at).forEach(w => {
-        const item = document.createElement("div"); item.className="warn-item";
-        item.innerHTML = `<span class="warn-reason">${esc(w.reason)}</span><span class="warn-meta">by ${esc(w.by)} · ${new Date(w.at).toLocaleDateString()}</span>`;
-        warnsList.appendChild(item);
-      });
+      Object.entries(warns).sort((a,b)=>b[1].at-a[1].at).forEach(([warnId, w]) => {
+  const item = document.createElement("div"); item.className="warn-item";
+  item.style.position="relative";
+  item.innerHTML = `<span class="warn-reason">${esc(w.reason)}</span><span class="warn-meta">by ${esc(w.by)} · ${new Date(w.at).toLocaleDateString()}</span>`;
+  const delWarn = document.createElement("button");
+  delWarn.textContent="✕"; delWarn.style.cssText="position:absolute;top:6px;right:6px;background:none;border:none;cursor:pointer;color:var(--text-dim);font-size:12px;";
+  delWarn.addEventListener("click", async () => {
+    await db.ref("users/"+targetUid+"/warnings/"+warnId).remove();
+    item.remove();
+  });
+  item.appendChild(delWarn);
+  warnsList.appendChild(item);
+});
     } else {
       warnsSection.style.display = "";
       warnsList.innerHTML = '<div style="color:var(--text-dim);font-size:12px;">No warnings.</div>';
@@ -1533,7 +1600,24 @@ function openEmojiPicker(msgId, ch, anchor) {
 function toggleReaction(msgId, ch, emoji) {
   const key = [...emoji].map(c => c.codePointAt(0).toString(16)).join("_");
   const ref  = db.ref("messages/"+ch+"/"+msgId+"/reactions/"+key+"/"+myUid);
-  ref.once("value", s => s.exists() ? ref.remove() : ref.set(true));
+  ref.once("value", async s => {
+    if (s.exists()) {
+      await ref.remove();
+      // find message author and decrement
+      const msgSnap = await db.ref("messages/"+ch+"/"+msgId).once("value");
+      const msgData = msgSnap.val();
+      if (msgData && msgData.userId && msgData.userId !== myUid) {
+        db.ref("users/"+msgData.userId+"/reactionsReceived").transaction(c => Math.max(0,(c||0)-1));
+      }
+    } else {
+      await ref.set(true);
+      const msgSnap = await db.ref("messages/"+ch+"/"+msgId).once("value");
+      const msgData = msgSnap.val();
+      if (msgData && msgData.userId && msgData.userId !== myUid) {
+        db.ref("users/"+msgData.userId+"/reactionsReceived").transaction(c => (c||0)+1);
+      }
+    }
+  });
 }
 
 function renderReactions(container, reactions, msgId, ch, msgUserId) {
