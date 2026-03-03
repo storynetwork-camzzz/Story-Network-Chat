@@ -1100,9 +1100,10 @@ function renderCustomChannelButtons() {
   });
 
   // Insert after the general/builtin channels section (before online/friends)
-  const allSections = document.querySelectorAll(".sidebar-section");
-  const builtinSection = allSections[0];
-  builtinSection.insertAdjacentElement("afterend", section);
+  const allSections = [...document.querySelectorAll(".sidebar-section")];
+  const generalSection = allSections.find(s => s.querySelector(".sidebar-label")?.textContent.includes("GENERAL"));
+  const target = generalSection || allSections[0];
+  target.insertAdjacentElement("afterend", section);
 }
 
 function switchChannel(ch) {
