@@ -1105,8 +1105,6 @@ function renderCustomChannelButtons() {
 }
 
 function switchChannel(ch) {
-
-function switchChannel(ch) {
   if (msgListeners[currentChannel]) {
     try { msgListeners[currentChannel].ref.off("child_added", msgListeners[currentChannel].fn); } catch(e){}
     delete msgListeners[currentChannel];
