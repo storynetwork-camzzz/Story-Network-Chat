@@ -21,7 +21,10 @@ const IMGBB_KEY  = "7ae7b64cb4da961ab6a7d18d920099a8";
 const MAX_CHARS  = 250;
 const PAGE_SIZE  = 50;
 const WEEK_MS    = 7 * 24 * 60 * 60 * 1000;
-const CHANNELS   = ["general", "offtopic", "announcements", "modchat", "leaderboard"];
+const BUILTIN_CHANNELS = ["general", "offtopic", "announcements", "modchat", "leaderboard"];
+function getAllChannels() {
+  return [...BUILTIN_CHANNELS, ...Object.keys(customChannels)];
+}
 const IMAGE_URL_RE = /(https?:\/\/[^\s<]+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s<]*)?)/gi;
 const ANY_URL_RE   = /(https?:\/\/[^\s<]+[^\s<.,:;"')\]{}])/g;
 
@@ -56,6 +59,8 @@ let appStarted     = false;
 let muteExpireTimer = null;
 let leaderboardTimer = null;
 let searchActive   = false;
+let customRoles    = {};
+let customChannels = {};
 
 // ============================================================
 // DOM HELPERS
@@ -365,6 +370,11 @@ function startApp() {
     updateSidebarUser();
   });
   db.ref("users").on("value", snap => { allUsersCache = snap.val() || {}; renderFriendsList(); });
+db.ref("config/customRoles").on("value", snap => { customRoles = snap.val() || {}; });
+db.ref("config/customChannels").on("value", snap => {
+    customChannels = snap.val() || {};
+    renderCustomChannelButtons();
+  });
   db.ref("presence").on("value", snap => {
     const data = snap.val() || {};
     $("onlineCount").textContent = Object.keys(data).length;
@@ -647,6 +657,7 @@ function renderOnlineList(data) {
     av.style.flexShrink = "0";
     const name = document.createElement("span"); name.className = "online-name";
     name.textContent = d.username+(uid===myUid?" (you)":""); name.style.color = d.color||"#4da6ff";
+
     const dot = document.createElement("span"); dot.className = "online-dot";
     row.appendChild(av); row.appendChild(name); row.appendChild(dot);
     row.addEventListener("click", () => openProfile(uid));
@@ -771,6 +782,13 @@ async function openProfile(targetUid) {
   if (isOwner(targetUid)) { const b=document.createElement("span"); b.className="owner-badge"; b.textContent="[Owner]"; badgesEl.appendChild(b); }
   if (isMod(targetUid))   { const b=document.createElement("span"); b.className="mod-badge"; b.textContent="[Mod]"; badgesEl.appendChild(b); }
   if (isDev(targetUid))   { const b=document.createElement("span"); b.className="dev-badge"; b.textContent="[Dev]"; badgesEl.appendChild(b); }
+if (userData.customRole && customRoles[userData.customRole]) {
+    const cr = customRoles[userData.customRole];
+    const b = document.createElement("span");
+    b.textContent = "[" + cr.name + "]";
+    b.style.cssText = `font-size:10px;font-weight:800;padding:2px 6px;border-radius:3px;background:${cr.color}22;color:${cr.color};border:1px solid ${cr.color}55;`;
+    badgesEl.appendChild(b);
+  }
 
   // Status
   $("profileStatus").textContent = userData.status ? "💬 "+userData.status : "";
@@ -1023,6 +1041,70 @@ function setupChannelButtons() {
   });
 }
 
+function renderCustomChannelButtons() {
+  // Remove any previously rendered custom channel buttons
+  document.querySelectorAll(".custom-ch-btn").forEach(b => b.remove());
+  const $customSection = document.getElementById("customChannelsSection");
+  if ($customSection) $customSection.remove();
+
+  const entries = Object.entries(customChannels);
+  if (!entries.length) return;
+
+  // Check access per channel
+  const canSeeChannel = (ch) => {
+    if (!ch.private) return true;
+    if (ch.requiredRole === "mod") return amOwner() || amMod();
+    if (ch.requiredRole === "dev") return isDev(myUid) || amOwner();
+    // custom role check
+    const myUserData = allUsersCache[myUid] || {};
+    return amOwner() || myUserData.customRole === ch.requiredRole;
+  };
+
+  const visible = entries.filter(([, ch]) => canSeeChannel(ch));
+  if (!visible.length) return;
+
+  const sidebar = document.querySelector(".sidebar-section:last-of-type");
+  const section = document.createElement("div");
+  section.className = "sidebar-section";
+  section.id = "customChannelsSection";
+
+  const label = document.createElement("div");
+  label.className = "sidebar-label";
+  label.textContent = "💬 CUSTOM";
+  section.appendChild(label);
+
+  visible.forEach(([id, ch]) => {
+    const btn = document.createElement("button");
+    btn.className = "channel-btn custom-ch-btn";
+    btn.dataset.channel = id;
+    if (currentChannel === id) btn.classList.add("selected");
+
+    const icon = document.createElement("span");
+    icon.className = "ch-hash";
+    icon.textContent = ch.icon || "#";
+
+    const name = document.createElement("span");
+    name.className = "ch-name";
+    name.textContent = ch.name;
+
+    const pip = document.createElement("span");
+    pip.className = "unread-pip";
+    pip.id = "pip-" + id;
+    pip.style.display = "none";
+
+    btn.appendChild(icon);
+    btn.appendChild(name);
+    btn.appendChild(pip);
+    btn.addEventListener("click", () => switchChannel(id));
+    section.appendChild(btn);
+  });
+
+  // Insert before the sidebar user panel at the bottom
+  const sidebarEl = document.getElementById("sidebar");
+  const spacer = sidebarEl.querySelector(".sidebar-spacer");
+  sidebarEl.insertBefore(section, spacer);
+}
+
 function switchChannel(ch) {
   if (msgListeners[currentChannel]) {
     try { msgListeners[currentChannel].ref.off("child_added", msgListeners[currentChannel].fn); } catch(e){}
@@ -1040,9 +1122,10 @@ function switchChannel(ch) {
   userScrolledUp = false;
 
   document.querySelectorAll(".channel-btn").forEach(b => b.classList.toggle("selected", b.dataset.channel===ch));
-  const labels = { general:"general", offtopic:"off-topic", announcements:"announcements", modchat:"mod-chat", leaderboard:"leaderboard" };
-  $("channelLabel").textContent = labels[ch]||ch;
-  $("msgInput").placeholder = "Message #"+(labels[ch]||ch);
+  const builtinLabels = { general:"general", offtopic:"off-topic", announcements:"announcements", modchat:"mod-chat", leaderboard:"leaderboard" };
+  const chLabel = builtinLabels[ch] || (customChannels[ch] ? customChannels[ch].name : ch);
+  $("channelLabel").textContent = chLabel;
+  $("msgInput").placeholder = "Message #" + chLabel;
   const pip = $("pip-"+ch); if(pip) pip.style.display="none";
 
   const isAnnouncements = ch === "announcements";
@@ -1070,6 +1153,23 @@ function switchChannel(ch) {
 
   // Apply mute on top
   checkMuteStatus();
+
+	// Block input if private custom channel and user lacks access
+  if (customChannels[ch]) {
+    const chData = customChannels[ch];
+    if (chData.private) {
+      const myUserData = allUsersCache[myUid] || {};
+      const hasAccess = amOwner()
+        || (chData.requiredRole === "mod" && amMod())
+        || (chData.requiredRole === "dev" && isDev(myUid))
+        || myUserData.customRole === chData.requiredRole;
+      if (!hasAccess) {
+        $("inputRow").style.display = "none";
+        $("formatToolbar").style.display = "none";
+      }
+    }
+  }
+
 
   const oldNotice = $("announcementsNotice");
   if (!isAnnouncements && oldNotice) oldNotice.style.display = "none";
@@ -1240,7 +1340,7 @@ async function loadOlderMessages(ch, oldestKey, btn) {
 // UNREAD DOTS
 // ============================================================
 function setupUnreadListeners() {
-  CHANNELS.forEach(ch => {
+  getAllChannels().forEach(ch => {
     if (ch===currentChannel || ch==="leaderboard") return;
     db.ref("messages/"+ch).off("child_added");
     const since = Date.now();
@@ -1333,6 +1433,14 @@ function renderMessage(data, ch, isNew, prepend) {
   if (isDevMsg) {
     const badge = document.createElement("span"); badge.className="dev-badge";
     badge.textContent="[Dev]"; nameWrap.appendChild(badge);
+  }
+const userDataForRole = allUsersCache[userId] || {};
+  if (userDataForRole.customRole && customRoles[userDataForRole.customRole]) {
+    const cr = customRoles[userDataForRole.customRole];
+    const badge = document.createElement("span");
+    badge.textContent = "[" + cr.name + "]";
+    badge.style.cssText = `font-size:10px;font-weight:800;color:${cr.color};text-shadow:0 0 6px ${cr.color}88;margin-right:3px;`;
+    nameWrap.appendChild(badge);
   }
 
   const uname = document.createElement("span");
