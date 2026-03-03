@@ -302,18 +302,30 @@ auth.onAuthStateChanged(async user => {
     updateSidebarUser();
   });
 
-  db.ref("config/mods").on("value", snap => { modUids = snap.val() || {}; updateSidebarUser(); });
+  db.ref("config/mods").on("value", snap => {
+    modUids = snap.val() || {};
+    updateSidebarUser();
+    // If we're in modchat but lost mod, kick us out
+    if (currentChannel === "modchat" && !amOwner() && !amMod()) switchChannel("general");
+  });
   db.ref("config/devs").on("value", snap => { devUids = snap.val() || {}; updateSidebarUser(); });
   db.ref("config/muted").on("value", snap => { mutedUids = snap.val() || {}; checkMuteStatus(); });
   db.ref("config/banned/"+myUid).on("value", snap => {
-    if (!snap.exists()) return;
-    const banData = snap.val();
-    $("appContainer").style.display = "none";
-    $("loadingScreen").style.display = "none";
-    $("authScreen").style.display = "none";
-    $("banScreen").style.display = "flex";
-    $("banReason").textContent = banData.reason || "No reason given.";
-    $("banBy").textContent = banData.by || "a moderator";
+    if (snap.exists()) {
+      const banData = snap.val();
+      $("appContainer").style.display = "none";
+      $("loadingScreen").style.display = "none";
+      $("authScreen").style.display = "none";
+      $("banScreen").style.display = "flex";
+      $("banReason").textContent = banData.reason || "No reason given.";
+      $("banBy").textContent = banData.by || "a moderator";
+    } else {
+      // Was unbanned while on ban screen — restore app
+      if ($("banScreen").style.display === "flex") {
+        $("banScreen").style.display = "none";
+        $("appContainer").style.display = "flex";
+      }
+    }
   });
 
   // Check for pending warns notification
