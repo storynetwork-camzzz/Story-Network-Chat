@@ -1099,11 +1099,9 @@ function renderCustomChannelButtons() {
     section.appendChild(btn);
   });
 
-  // Insert before the sidebar user panel at the bottom
-  const sidebarEl = document.getElementById("sidebar");
-  const spacer = sidebarEl.querySelector(".sidebar-spacer");
-  sidebarEl.insertBefore(section, spacer);
-}
+  // Insert after the built-in channels section
+  const channelSection = document.querySelector(".sidebar-section");
+  channelSection.insertAdjacentElement("afterend", section);
 
 function switchChannel(ch) {
   if (msgListeners[currentChannel]) {
