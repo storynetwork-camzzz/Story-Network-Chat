@@ -1102,6 +1102,9 @@ function renderCustomChannelButtons() {
   // Insert after the built-in channels section
   const channelSection = document.querySelector(".sidebar-section");
   channelSection.insertAdjacentElement("afterend", section);
+}
+
+function switchChannel(ch) {
 
 function switchChannel(ch) {
   if (msgListeners[currentChannel]) {
