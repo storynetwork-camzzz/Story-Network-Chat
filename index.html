@@ -97,66 +97,77 @@
 
     <!-- SIDEBAR -->
     <div id="sidebar">
+
+      <!-- FIXED TOP: Logo / header — clicking goes to my stats -->
       <div class="sidebar-header">
         <img src="https://codehs.com/uploads/b9084e2547f1923caa433b97f16c89d1" alt="SN" class="sidebar-logo">
         <span class="sidebar-title">Story Network Chat</span>
       </div>
 
-      <!-- IMPORTANT -->
-      <div class="sidebar-section">
-        <div class="sidebar-label">📌 IMPORTANT</div>
-        <button class="channel-btn" data-channel="announcements">
-          <span class="ch-hash">📢</span>
-          <span class="ch-name">announcements</span>
-          <span class="unread-pip" id="pip-announcements" style="display:none;"></span>
-        </button>
-        <button class="channel-btn" data-channel="leaderboard">
-          <span class="ch-hash">🏆</span>
-          <span class="ch-name">leaderboard</span>
-          <span class="unread-pip" id="pip-leaderboard" style="display:none;"></span>
-        </button>
+      <!-- SCROLLABLE MIDDLE -->
+      <div class="sidebar-scroll">
+
+        <!-- IMPORTANT -->
+        <div class="sidebar-section">
+          <div class="sidebar-label">📌 IMPORTANT</div>
+          <button class="channel-btn" data-channel="announcements">
+            <span class="ch-hash">📢</span>
+            <span class="ch-name">announcements</span>
+            <span class="unread-pip" id="pip-announcements" style="display:none;"></span>
+          </button>
+          <button class="channel-btn" data-channel="leaderboard">
+            <span class="ch-hash">🏆</span>
+            <span class="ch-name">leaderboard</span>
+            <span class="unread-pip" id="pip-leaderboard" style="display:none;"></span>
+          </button>
+          <button class="channel-btn" data-channel="myleaderboard">
+            <span class="ch-hash">👤</span>
+            <span class="ch-name">my stats</span>
+            <span class="unread-pip" id="pip-myleaderboard" style="display:none;"></span>
+          </button>
+        </div>
+
+        <!-- GENERAL -->
+        <div class="sidebar-section">
+          <div class="sidebar-label">💬 GENERAL</div>
+          <button class="channel-btn selected" data-channel="general">
+            <span class="ch-hash">#</span>
+            <span class="ch-name">general</span>
+            <span class="unread-pip" id="pip-general" style="display:none;"></span>
+          </button>
+          <button class="channel-btn" data-channel="offtopic">
+            <span class="ch-hash">#</span>
+            <span class="ch-name">off-topic</span>
+            <span class="unread-pip" id="pip-offtopic" style="display:none;"></span>
+          </button>
+        </div>
+
+        <!-- MOD -->
+        <div class="sidebar-section" id="modSection" style="display:none;">
+          <div class="sidebar-label">🛡️ MOD</div>
+          <button class="channel-btn" data-channel="modchat" id="modChatBtn">
+            <span class="ch-hash">🛡️</span>
+            <span class="ch-name">mod-chat</span>
+            <span class="unread-pip" id="pip-modchat" style="display:none;"></span>
+          </button>
+        </div>
+
+        <!-- FRIEND REQUESTS (compact, no full friends list) -->
+        <div class="sidebar-section">
+          <div class="sidebar-label">👥 REQUESTS <span id="friendRequestBadge" class="req-badge" style="display:none;">0</span></div>
+          <div id="friendRequestsList"></div>
+        </div>
+
+        <!-- ONLINE -->
+        <div class="sidebar-section">
+          <div class="sidebar-label">🟢 ONLINE — <span id="onlineCount">0</span></div>
+          <div id="onlineList"></div>
+        </div>
+
       </div>
+      <!-- END SCROLLABLE MIDDLE -->
 
-      <!-- GENERAL -->
-      <div class="sidebar-section">
-        <div class="sidebar-label">💬 GENERAL</div>
-        <button class="channel-btn selected" data-channel="general">
-          <span class="ch-hash">#</span>
-          <span class="ch-name">general</span>
-          <span class="unread-pip" id="pip-general" style="display:none;"></span>
-        </button>
-        <button class="channel-btn" data-channel="offtopic">
-          <span class="ch-hash">#</span>
-          <span class="ch-name">off-topic</span>
-          <span class="unread-pip" id="pip-offtopic" style="display:none;"></span>
-        </button>
-      </div>
-
-      <!-- MOD -->
-      <div class="sidebar-section" id="modSection" style="display:none;">
-        <div class="sidebar-label">🛡️ MOD</div>
-        <button class="channel-btn" data-channel="modchat" id="modChatBtn">
-          <span class="ch-hash">🛡️</span>
-          <span class="ch-name">mod-chat</span>
-          <span class="unread-pip" id="pip-modchat" style="display:none;"></span>
-        </button>
-      </div>
-
-      <!-- FRIENDS -->
-      <div class="sidebar-section">
-        <div class="sidebar-label">👥 FRIENDS <span id="friendRequestBadge" class="req-badge" style="display:none;">0</span></div>
-        <div id="friendRequestsList"></div>
-        <div id="friendsList"><div class="no-friends-msg">No friends yet!</div></div>
-      </div>
-
-      <!-- ONLINE -->
-      <div class="sidebar-section">
-        <div class="sidebar-label">🟢 ONLINE — <span id="onlineCount">0</span></div>
-        <div id="onlineList"></div>
-      </div>
-
-      <div class="sidebar-spacer"></div>
-
+      <!-- FIXED BOTTOM: User panel — always on screen -->
       <div class="sidebar-user">
         <div class="user-avatar-wrap" id="avatarWrap" title="Click to change avatar">
           <div class="user-avatar" id="sidebarAvatar"></div>
@@ -172,7 +183,9 @@
           <button id="logoutBtn" class="icon-btn" title="Sign out">⏻</button>
         </div>
       </div>
+
     </div>
+    <!-- END SIDEBAR -->
 
     <!-- CHAT AREA -->
     <div id="chatArea">
@@ -241,42 +254,65 @@
         <button id="sendBtn">Send</button>
       </div>
     </div>
+    <!-- END CHAT AREA -->
+
   </div>
+  <!-- END APP CONTAINER -->
 
   <!-- ========== PROFILE MODAL ========== -->
   <div id="profileModal" style="display:none;">
     <div class="profile-card">
       <button class="profile-close" id="profileClose">✕</button>
-      <div class="profile-header">
-        <div class="profile-avatar-wrap" id="profileAvatar"></div>
-        <div class="profile-info">
-          <div class="profile-name" id="profileName"></div>
-          <div class="profile-badges" id="profileBadges"></div>
-          <div class="profile-status" id="profileStatus"></div>
+
+      <!-- Banner -->
+      <div class="profile-banner" id="profileBanner"></div>
+
+      <!-- Body (scrollable) -->
+      <div class="profile-body">
+        <div class="profile-header">
+          <div class="profile-avatar-wrap" id="profileAvatar"></div>
+          <div class="profile-info">
+            <div class="profile-name" id="profileName"></div>
+            <div class="profile-badges" id="profileBadges"></div>
+            <div class="profile-status" id="profileStatus"></div>
+          </div>
         </div>
-      </div>
-      <div class="profile-stats">
-        <div class="profile-stat">
-          <span class="stat-value" id="profileMsgCount">0</span>
-          <span class="stat-label">Messages</span>
+
+        <!-- Bio -->
+        <div class="profile-bio" id="profileBio" style="display:none;"></div>
+
+        <!-- Main stats -->
+        <div class="profile-stats">
+          <div class="profile-stat">
+            <span class="stat-value" id="profileMsgCount">0</span>
+            <span class="stat-label">Messages</span>
+          </div>
+          <div class="profile-stat">
+            <span class="stat-value" id="profileRep">0</span>
+            <span class="stat-label">Rep ⭐</span>
+          </div>
+          <div class="profile-stat">
+            <span class="stat-value" id="profileFriendCount">0</span>
+            <span class="stat-label">Friends</span>
+          </div>
         </div>
-        <div class="profile-stat">
-          <span class="stat-value" id="profileRep">0</span>
-          <span class="stat-label">Rep ⭐</span>
+
+        <!-- Extra stats -->
+        <div class="profile-extra-stats" id="profileExtraStats"></div>
+
+        <div class="profile-joined">📅 Joined: <span id="profileJoined"></span></div>
+        <div class="profile-actions" id="profileActions"></div>
+
+        <div class="profile-warns" id="profileWarns" style="display:none;">
+          <div class="warns-label">⚠️ Warning History</div>
+          <div id="warnsList"></div>
         </div>
-        <div class="profile-stat">
-          <span class="stat-value" id="profileFriendCount">0</span>
-          <span class="stat-label">Friends</span>
-        </div>
-      </div>
-      <div class="profile-joined">📅 Joined: <span id="profileJoined"></span></div>
-      <div class="profile-actions" id="profileActions"></div>
-      <div class="profile-warns" id="profileWarns" style="display:none;">
-        <div class="warns-label">⚠️ Warning History</div>
-        <div id="warnsList"></div>
       </div>
     </div>
   </div>
+
+  <!-- Hidden banner upload input -->
+  <input type="file" id="bannerInput" accept="image/*" style="display:none;">
 
   <!-- ========== POLL MODAL ========== -->
   <div id="pollModal" style="display:none;">
@@ -356,6 +392,8 @@
         <button id="settingsClose" class="close-btn">✕</button>
       </div>
       <div class="settings-body">
+
+        <!-- Username -->
         <div class="settings-section">
           <div class="settings-section-label">USERNAME</div>
           <p class="settings-desc">Change your display name (once per week)</p>
@@ -365,6 +403,8 @@
           </div>
           <p id="usernameChangeMsg" class="settings-msg"></p>
         </div>
+
+        <!-- Status -->
         <div class="settings-section">
           <div class="settings-section-label">STATUS</div>
           <p class="settings-desc">Set a custom status visible on your profile</p>
@@ -374,6 +414,19 @@
           </div>
           <p id="statusMsg" class="settings-msg"></p>
         </div>
+
+        <!-- Bio -->
+        <div class="settings-section">
+          <div class="settings-section-label">BIO</div>
+          <p class="settings-desc">Tell people a bit about yourself</p>
+          <textarea id="bioInput" class="settings-textarea" placeholder="Write something about yourself..." maxlength="160"></textarea>
+          <div style="display:flex;justify-content:flex-end;margin-top:8px;">
+            <button id="saveBioBtn" class="settings-save-btn">Save</button>
+          </div>
+          <p id="bioMsg" class="settings-msg"></p>
+        </div>
+
+        <!-- Username color -->
         <div class="settings-section">
           <div class="settings-section-label">USERNAME COLOR</div>
           <div class="settings-row">
@@ -381,14 +434,19 @@
             <span id="colorLabel" class="settings-color-label">#4da6ff</span>
           </div>
         </div>
+
+        <!-- Theme -->
         <div class="settings-section">
           <div class="settings-section-label">THEME</div>
           <div class="theme-grid" id="themeGrid"></div>
         </div>
+
+        <!-- Text size -->
         <div class="settings-section">
           <div class="settings-section-label">TEXT SIZE</div>
           <div class="size-row" id="sizeRow"></div>
         </div>
+
       </div>
     </div>
   </div>
