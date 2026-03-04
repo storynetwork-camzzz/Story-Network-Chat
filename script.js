@@ -21,12 +21,34 @@ const IMGBB_KEY  = "7ae7b64cb4da961ab6a7d18d920099a8";
 const MAX_CHARS  = 250;
 const PAGE_SIZE  = 50;
 const WEEK_MS    = 7 * 24 * 60 * 60 * 1000;
-const BUILTIN_CHANNELS = ["general", "offtopic", "announcements", "modchat", "leaderboard"];
+const BUILTIN_CHANNELS = ["general", "offtopic", "announcements", "modchat", "leaderboard", "myleaderboard"];
 function getAllChannels() {
   return [...BUILTIN_CHANNELS, ...Object.keys(customChannels)];
 }
 const IMAGE_URL_RE = /(https?:\/\/[^\s<]+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s<]*)?)/gi;
 const ANY_URL_RE   = /(https?:\/\/[^\s<]+[^\s<.,:;"')\]{}])/g;
+
+// ============================================================
+// ACHIEVEMENTS DEFINITION
+// ============================================================
+const ACHIEVEMENTS = [
+  { id: "first_message",   icon: "💬", name: "First Words",       desc: "Send your first message",             check: u => (u.messageCount||0) >= 1 },
+  { id: "messages_10",     icon: "📨", name: "Getting Started",   desc: "Send 10 messages",                    check: u => (u.messageCount||0) >= 10 },
+  { id: "messages_100",    icon: "💯", name: "Century",           desc: "Send 100 messages",                   check: u => (u.messageCount||0) >= 100 },
+  { id: "messages_500",    icon: "🚀", name: "Rocket",            desc: "Send 500 messages",                   check: u => (u.messageCount||0) >= 500 },
+  { id: "messages_1000",   icon: "👑", name: "Legend",            desc: "Send 1000 messages",                  check: u => (u.messageCount||0) >= 1000 },
+  { id: "rep_1",           icon: "⭐", name: "Liked",             desc: "Receive your first rep",              check: u => (u.rep||0) >= 1 },
+  { id: "rep_10",          icon: "🌟", name: "Fan Favourite",     desc: "Receive 10 rep",                      check: u => (u.rep||0) >= 10 },
+  { id: "streak_3",        icon: "🔥", name: "On Fire",           desc: "3-day active streak",                 check: u => (u.currentStreak||0) >= 3 },
+  { id: "streak_7",        icon: "🗓️", name: "Week Warrior",      desc: "7-day active streak",                 check: u => (u.currentStreak||0) >= 7 },
+  { id: "streak_30",       icon: "🏅", name: "Dedicated",         desc: "30-day active streak",                check: u => (u.currentStreak||0) >= 30 },
+  { id: "images_5",        icon: "📸", name: "Shutterbug",        desc: "Send 5 images",                       check: u => (u.imagesSent||0) >= 5 },
+  { id: "polls_voted_5",   icon: "🗳️", name: "Voter",             desc: "Vote in 5 polls",                     check: u => (u.pollsVotedIn||0) >= 5 },
+  { id: "online_60",       icon: "⏱️", name: "Settled In",        desc: "Spend 1 hour online",                 check: u => (u.timeOnlineMinutes||0) >= 60 },
+  { id: "online_600",      icon: "🕰️", name: "Homebody",          desc: "Spend 10 hours online",               check: u => (u.timeOnlineMinutes||0) >= 600 },
+  { id: "friends_1",       icon: "🤝", name: "Friendly",          desc: "Make your first friend",              check: (u, extra) => (extra.friendCount||0) >= 1 },
+  { id: "friends_5",       icon: "👥", name: "Social Butterfly",  desc: "Have 5 friends",                      check: (u, extra) => (extra.friendCount||0) >= 5 },
+];
 
 // ============================================================
 // STATE
@@ -37,6 +59,8 @@ let myUsername     = "";
 let myColor        = "#4da6ff";
 let myAvatar       = null;
 let myStatus       = "";
+let myBio          = "";
+let myBanner       = null;
 let ownerUid       = null;
 let modUids        = {};
 let devUids        = {};
@@ -61,6 +85,9 @@ let leaderboardTimer = null;
 let searchActive   = false;
 let customRoles    = {};
 let customChannels = {};
+let myCustomReactions = [];
+let onlineMinuteTimer = null;
+let myAchievements = {};
 
 // ============================================================
 // DOM HELPERS
@@ -255,7 +282,10 @@ $("signupBtn").addEventListener("click", async () => {
     await db.ref("users/"+result.user.uid).set({
       username, usernameLower: username.toLowerCase(),
       color: "#4da6ff", avatarUrl: null, lastUsernameChange: 0,
-      createdAt: Date.now(), messageCount: 0, rep: 0, status: ""
+      createdAt: Date.now(), messageCount: 0, rep: 0, status: "",
+      bio: "", bannerUrl: null,
+      timeOnlineMinutes: 0, currentStreak: 0, lastActiveDay: "",
+      imagesSent: 0, pollsVotedIn: 0
     });
   } catch(err) { showError("signupError", friendlyError(err.code)); }
 });
@@ -273,7 +303,6 @@ auth.onAuthStateChanged(async user => {
     showCard("login"); return;
   }
 
-  // Check ban first
   const banSnap = await db.ref("config/banned/"+user.uid).once("value");
   if (banSnap.exists()) {
     const banData = banSnap.val();
@@ -296,8 +325,9 @@ auth.onAuthStateChanged(async user => {
   myColor    = data.color    || "#4da6ff";
   myAvatar   = data.avatarUrl || null;
   myStatus   = data.status   || "";
+  myBio      = data.bio      || "";
+  myBanner   = data.bannerUrl || null;
 
-  // Load config
   db.ref("config/ownerUid").once("value", ownerSnap => {
     if (ownerSnap.val()) {
       ownerUid = ownerSnap.val();
@@ -310,7 +340,6 @@ auth.onAuthStateChanged(async user => {
   db.ref("config/mods").on("value", snap => {
     modUids = snap.val() || {};
     updateSidebarUser();
-    // If we're in modchat but lost mod, kick us out
     if (currentChannel === "modchat" && !amOwner() && !amMod()) switchChannel("general");
   });
   db.ref("config/devs").on("value", snap => { devUids = snap.val() || {}; updateSidebarUser(); });
@@ -325,7 +354,6 @@ auth.onAuthStateChanged(async user => {
       $("banReason").textContent = banData.reason || "No reason given.";
       $("banBy").textContent = banData.by || "a moderator";
     } else {
-      // Was unbanned while on ban screen — restore app
       if ($("banScreen").style.display === "flex") {
         $("banScreen").style.display = "none";
         $("appContainer").style.display = "flex";
@@ -333,12 +361,89 @@ auth.onAuthStateChanged(async user => {
     }
   });
 
-  // Check for pending warns notification
+  // Load my custom reactions
+  db.ref("users/"+myUid+"/customReactions").on("value", snap => {
+    myCustomReactions = snap.val() || [];
+  });
+
+  // Load my achievements
+  db.ref("users/"+myUid+"/achievements").on("value", snap => {
+    myAchievements = snap.val() || {};
+  });
+
   checkPendingWarnNotification();
+  updateStreakAndDay();
 
   $("authScreen").style.display = "none";
   startApp();
 });
+
+// ============================================================
+// STREAK & DAY TRACKING
+// ============================================================
+async function updateStreakAndDay() {
+  if (!myUid) return;
+  const now = new Date();
+  const today = now.getFullYear()+"_"+(now.getMonth()+1).toString().padStart(2,"0")+"_"+now.getDate().toString().padStart(2,"0");
+
+  const snap = await db.ref("users/"+myUid).once("value");
+  const data = snap.val() || {};
+  const lastDay = data.lastActiveDay || "";
+
+  if (lastDay === today) return; // already updated today
+
+  // Calculate streak
+  let streak = data.currentStreak || 0;
+  if (lastDay) {
+    const lastDate = new Date(lastDay.replace(/_/g, "-"));
+    const todayDate = new Date(today.replace(/_/g, "-"));
+    const diffDays = Math.round((todayDate - lastDate) / (1000*60*60*24));
+    if (diffDays === 1) {
+      streak += 1;
+    } else if (diffDays > 1) {
+      streak = 1;
+    }
+  } else {
+    streak = 1;
+  }
+
+  await db.ref("users/"+myUid).update({
+    lastActiveDay: today,
+    currentStreak: streak,
+    [`activeDays/${today}`]: true
+  });
+}
+
+// ============================================================
+// TIME ONLINE TRACKER (every 1 minute)
+// ============================================================
+function startOnlineTimer() {
+  clearInterval(onlineMinuteTimer);
+  onlineMinuteTimer = setInterval(() => {
+    if (!myUid) return;
+    db.ref("users/"+myUid+"/timeOnlineMinutes").transaction(c => (c||0)+1);
+    checkAchievements();
+  }, 60000);
+}
+
+// ============================================================
+// ACHIEVEMENT CHECKER
+// ============================================================
+async function checkAchievements() {
+  if (!myUid) return;
+  const snap = await db.ref("users/"+myUid).once("value");
+  const data = snap.val() || {};
+  const friendSnap = await db.ref("users/"+myUid+"/friends").once("value");
+  const extra = { friendCount: friendSnap.numChildren ? friendSnap.numChildren() : 0 };
+
+  for (const ach of ACHIEVEMENTS) {
+    if (myAchievements[ach.id]) continue;
+    if (ach.check(data, extra)) {
+      await db.ref("users/"+myUid+"/achievements/"+ach.id).set(true);
+      showToast("🏅 Achievement unlocked: "+ach.name, "ok");
+    }
+  }
+}
 
 // ============================================================
 // LOGOUT
@@ -349,6 +454,7 @@ $("logoutBtn").addEventListener("click", () => {
   setTyping(false);
   clearTimeout(muteExpireTimer);
   clearInterval(leaderboardTimer);
+  clearInterval(onlineMinuteTimer);
   Object.values(msgListeners).forEach(({ ref: r, fn: f }) => { try { r.off("child_added", f); } catch(e){} });
   msgListeners = {};
   auth.signOut();
@@ -367,11 +473,13 @@ function startApp() {
     myColor    = d.color    || myColor;
     myAvatar   = d.avatarUrl || null;
     myStatus   = d.status   || "";
+    myBio      = d.bio      || "";
+    myBanner   = d.bannerUrl || null;
     updateSidebarUser();
   });
-  db.ref("users").on("value", snap => { allUsersCache = snap.val() || {}; renderFriendsList(); });
-db.ref("config/customRoles").on("value", snap => { customRoles = snap.val() || {}; });
-db.ref("config/customChannels").on("value", snap => {
+  db.ref("users").on("value", snap => { allUsersCache = snap.val() || {}; });
+  db.ref("config/customRoles").on("value", snap => { customRoles = snap.val() || {}; });
+  db.ref("config/customChannels").on("value", snap => {
     customChannels = snap.val() || {};
     renderCustomChannelButtons();
   });
@@ -379,14 +487,10 @@ db.ref("config/customChannels").on("value", snap => {
     const data = snap.val() || {};
     $("onlineCount").textContent = Object.keys(data).length;
     renderOnlineList(data);
-    renderFriendsList();
   });
-  // Friends listener
   db.ref("users/"+myUid+"/friends").on("value", snap => {
     myFriends = snap.val() || {};
-    renderFriendsList();
   });
-  // Friend requests listener
   db.ref("friendRequests/"+myUid).on("value", snap => {
     renderFriendRequests(snap.val() || {});
   });
@@ -425,6 +529,14 @@ function setupApp() {
   buildSizeRow();
   switchChannel("general");
   setupUnreadListeners();
+  startOnlineTimer();
+
+  // Logo click → my leaderboard / stats
+  const logoBtn = document.querySelector(".sidebar-header");
+  if (logoBtn) {
+    logoBtn.style.cursor = "pointer";
+    logoBtn.addEventListener("click", () => switchChannel("myleaderboard"));
+  }
 
   $("chatbox").addEventListener("scroll", function() {
     const dist = this.scrollHeight - this.scrollTop - this.clientHeight;
@@ -441,23 +553,20 @@ function checkMuteStatus() {
   clearTimeout(muteExpireTimer);
   const muteData = mutedUids[myUid];
   if (muteData && muteData.until > Date.now()) {
-    // Currently muted
     const untilTime = new Date(muteData.until).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
     $("muteUntilTime").textContent = untilTime;
     $("muteNotice").style.display = "flex";
     $("inputRow").style.display = "none";
     $("formatToolbar").style.display = "none";
-    // Auto-unmute
     muteExpireTimer = setTimeout(() => {
       db.ref("config/muted/"+myUid).remove();
       $("muteNotice").style.display = "none";
-      if (currentChannel !== "announcements" && currentChannel !== "leaderboard") {
+      if (currentChannel !== "announcements" && currentChannel !== "leaderboard" && currentChannel !== "myleaderboard") {
         $("inputRow").style.display = "flex";
         $("formatToolbar").style.display = "flex";
       }
     }, muteData.until - Date.now());
   } else if (muteData && muteData.until <= Date.now()) {
-    // Expired — clean up
     db.ref("config/muted/"+myUid).remove();
     $("muteNotice").style.display = "none";
   } else {
@@ -532,7 +641,6 @@ async function checkPendingWarnNotification() {
   const warns = snap.val();
   const entries = Object.entries(warns);
   if (!entries.length) return;
-  // Show the most recent unseen warn
   entries.sort((a,b) => b[1].at - a[1].at);
   const [warnId, warn] = entries[0];
   setTimeout(() => {
@@ -569,7 +677,6 @@ function updateSidebarUser() {
     tagEl.style.textShadow = "";
   }
 
-  // Show/hide mod section
   const modSection = $("modSection");
   if (modSection) modSection.style.display = (amOwner() || amMod()) ? "" : "none";
 
@@ -630,10 +737,9 @@ function setupPresence() {
     if (!snap.val()) return;
     ref.onDisconnect().remove();
     ref.set({ username: myUsername, color: myColor, uid: myUid });
-    // Track last seen date for leaderboard
     const now = new Date();
-const today = now.getFullYear()+"_"+(now.getMonth()+1).toString().padStart(2,"0")+"_"+now.getDate().toString().padStart(2,"0");
-db.ref("users/"+myUid+"/activeDays/"+today).set(true);
+    const today = now.getFullYear()+"_"+(now.getMonth()+1).toString().padStart(2,"0")+"_"+now.getDate().toString().padStart(2,"0");
+    db.ref("users/"+myUid+"/activeDays/"+today).set(true);
   });
 }
 
@@ -657,7 +763,6 @@ function renderOnlineList(data) {
     av.style.flexShrink = "0";
     const name = document.createElement("span"); name.className = "online-name";
     name.textContent = d.username+(uid===myUid?" (you)":""); name.style.color = d.color||"#4da6ff";
-
     const dot = document.createElement("span"); dot.className = "online-dot";
     row.appendChild(av); row.appendChild(name); row.appendChild(dot);
     row.addEventListener("click", () => openProfile(uid));
@@ -696,54 +801,13 @@ function renderFriendRequests(requests) {
       await db.ref("users/"+fromUid+"/friends/"+myUid).set({ addedAt: Date.now(), nickname: "" });
       await db.ref("friendRequests/"+myUid+"/"+fromUid).remove();
       showToast("You are now friends with "+data.username+"!","ok");
+      checkAchievements();
     });
     declineBtn.addEventListener("click", async () => {
       await db.ref("friendRequests/"+myUid+"/"+fromUid).remove();
     });
     row.appendChild(av); row.appendChild(name); row.appendChild(acceptBtn); row.appendChild(declineBtn);
     list.appendChild(row);
-  });
-}
-
-function renderFriendsList() {
-  const list = $("friendsList");
-  const entries = Object.entries(myFriends);
-  if (!entries.length) {
-    list.innerHTML = '<div class="no-friends-msg">No friends yet!</div>';
-    return;
-  }
-  list.innerHTML = "";
-  const presenceSnap = {};
-  db.ref("presence").once("value", snap => {
-    const online = snap.val() || {};
-    entries.forEach(([friendUid, friendData]) => {
-      const userData = allUsersCache[friendUid] || {};
-      const isOnline = !!online[friendUid];
-      const displayName = friendData.nickname || userData.username || "Unknown";
-      const color = userData.color || "#4da6ff";
-      const row = document.createElement("div"); row.className = "online-row friend-row";
-      row.style.cursor = "pointer";
-      const av = buildAvatar(userData.avatarUrl||null, displayName, color, 22);
-      const nameEl = document.createElement("span"); nameEl.className="online-name";
-      nameEl.textContent = displayName; nameEl.style.color = color;
-      const dot = document.createElement("span");
-      dot.className = isOnline ? "online-dot" : "offline-dot";
-      const nicknameBtn = document.createElement("button"); nicknameBtn.className="nickname-btn"; nicknameBtn.title="Set nickname"; nicknameBtn.textContent="✏️";
-      nicknameBtn.addEventListener("click", e => { e.stopPropagation(); openNicknameModal(friendUid, friendData.nickname||""); });
-      const removeBtn = document.createElement("button"); removeBtn.className="nickname-btn"; removeBtn.title="Remove friend"; removeBtn.textContent="❌";
-      removeBtn.style.marginLeft="2px";
-      removeBtn.addEventListener("click", async e => {
-        e.stopPropagation();
-        const ok = await showConfirm("❌","Remove Friend","Remove "+displayName+" from your friends?");
-        if (!ok) return;
-        await db.ref("users/"+myUid+"/friends/"+friendUid).remove();
-        await db.ref("users/"+friendUid+"/friends/"+myUid).remove();
-        showToast("Removed "+displayName+" from friends","ok");
-      });
-      row.appendChild(av); row.appendChild(nameEl); row.appendChild(dot); row.appendChild(nicknameBtn); row.appendChild(removeBtn);
-      row.addEventListener("click", () => openProfile(friendUid));
-      list.appendChild(row);
-    });
   });
 }
 
@@ -768,6 +832,18 @@ async function openProfile(targetUid) {
   const color = userData.color || "#4da6ff";
   const username = userData.username || "Unknown";
 
+  // Banner
+  const bannerEl = $("profileBanner");
+  if (bannerEl) {
+    if (userData.bannerUrl) {
+      bannerEl.style.backgroundImage = `url(${userData.bannerUrl})`;
+      bannerEl.style.display = "block";
+    } else {
+      bannerEl.style.backgroundImage = `linear-gradient(135deg, ${color}44, ${color}11)`;
+      bannerEl.style.display = "block";
+    }
+  }
+
   // Avatar
   const avWrap = $("profileAvatar");
   avWrap.innerHTML = "";
@@ -782,7 +858,7 @@ async function openProfile(targetUid) {
   if (isOwner(targetUid)) { const b=document.createElement("span"); b.className="owner-badge"; b.textContent="[Owner]"; badgesEl.appendChild(b); }
   if (isMod(targetUid))   { const b=document.createElement("span"); b.className="mod-badge"; b.textContent="[Mod]"; badgesEl.appendChild(b); }
   if (isDev(targetUid))   { const b=document.createElement("span"); b.className="dev-badge"; b.textContent="[Dev]"; badgesEl.appendChild(b); }
-if (userData.customRole && customRoles[userData.customRole]) {
+  if (userData.customRole && customRoles[userData.customRole]) {
     const cr = customRoles[userData.customRole];
     const b = document.createElement("span");
     b.textContent = "[" + cr.name + "]";
@@ -790,29 +866,63 @@ if (userData.customRole && customRoles[userData.customRole]) {
     badgesEl.appendChild(b);
   }
 
+  // Achievement badges on profile
+  const achSnap = await db.ref("users/"+targetUid+"/achievements").once("value");
+  const userAchs = achSnap.val() || {};
+  const achRow = document.createElement("div"); achRow.style.cssText="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;";
+  ACHIEVEMENTS.filter(a => userAchs[a.id]).forEach(a => {
+    const span = document.createElement("span");
+    span.title = a.name+": "+a.desc;
+    span.style.cssText="font-size:18px;cursor:default;";
+    span.textContent = a.icon;
+    achRow.appendChild(span);
+  });
+  badgesEl.appendChild(achRow);
+
   // Status
   $("profileStatus").textContent = userData.status ? "💬 "+userData.status : "";
+
+  // Bio
+  const bioEl = $("profileBio");
+  if (bioEl) bioEl.textContent = userData.bio || "";
 
   // Stats
   $("profileMsgCount").textContent = userData.messageCount || 0;
   $("profileRep").textContent = userData.rep || 0;
 
-  // Friends count
   const friendsSnap = await db.ref("users/"+targetUid+"/friends").once("value");
   $("profileFriendCount").textContent = friendsSnap.numChildren ? friendsSnap.numChildren() : 0;
 
-  // Join date
   const joined = userData.createdAt ? new Date(userData.createdAt).toLocaleDateString() : "Unknown";
   $("profileJoined").textContent = joined;
+
+  // Extra stats row
+  const extraStats = $("profileExtraStats");
+  if (extraStats) {
+    extraStats.innerHTML = "";
+    const stats = [
+      { label: "⏱️ Online", value: formatMinutes(userData.timeOnlineMinutes||0) },
+      { label: "🔥 Streak", value: (userData.currentStreak||0)+"d" },
+      { label: "📸 Images", value: userData.imagesSent||0 },
+      { label: "🗳️ Polls Voted", value: userData.pollsVotedIn||0 },
+    ];
+    stats.forEach(s => {
+      const d = document.createElement("div"); d.className="profile-stat";
+      d.innerHTML=`<span class="stat-value" style="font-size:14px;">${s.value}</span><span class="stat-label">${s.label}</span>`;
+      extraStats.appendChild(d);
+    });
+  }
 
   // Actions
   const actionsEl = $("profileActions"); actionsEl.innerHTML = "";
 
   if (targetUid !== myUid) {
-    // Rep button
+    // Rep button (toggle)
+    const repGivenSnap = await db.ref("users/"+targetUid+"/repGivenBy/"+myUid).once("value");
+    const alreadyRepped = repGivenSnap.exists();
     const repBtn = document.createElement("button"); repBtn.className="profile-action-btn rep-btn";
-    repBtn.textContent = "⭐ Give Rep";
-    repBtn.addEventListener("click", () => giveRep(targetUid, username));
+    repBtn.textContent = alreadyRepped ? "💔 Remove Rep" : "⭐ Give Rep";
+    repBtn.addEventListener("click", () => toggleRep(targetUid, username, repBtn));
     actionsEl.appendChild(repBtn);
 
     // Friend button
@@ -827,7 +937,6 @@ if (userData.customRole && customRoles[userData.customRole]) {
       actionsEl.appendChild(friendedBtn);
     }
 
-    // Mod actions
     if (canModerate() && !isOwner(targetUid)) {
       const warnBtn = document.createElement("button"); warnBtn.className="profile-action-btn warn-btn";
       warnBtn.textContent = "⚠️ Warn";
@@ -882,6 +991,12 @@ if (userData.customRole && customRoles[userData.customRole]) {
         actionsEl.appendChild(banBtn);
       }
     }
+  } else {
+    // Own profile — show banner upload button
+    const bannerBtn = document.createElement("button"); bannerBtn.className="profile-action-btn";
+    bannerBtn.textContent = "🖼️ Change Banner";
+    bannerBtn.addEventListener("click", () => { $("bannerInput").click(); });
+    actionsEl.appendChild(bannerBtn);
   }
 
   // Warn history (mods/owner only)
@@ -894,18 +1009,18 @@ if (userData.customRole && customRoles[userData.customRole]) {
       warnsSection.style.display = "";
       const warns = warnsSnap.val();
       Object.entries(warns).sort((a,b)=>b[1].at-a[1].at).forEach(([warnId, w]) => {
-  const item = document.createElement("div"); item.className="warn-item";
-  item.style.position="relative";
-  item.innerHTML = `<span class="warn-reason">${esc(w.reason)}</span><span class="warn-meta">by ${esc(w.by)} · ${new Date(w.at).toLocaleDateString()}</span>`;
-  const delWarn = document.createElement("button");
-  delWarn.textContent="✕"; delWarn.style.cssText="position:absolute;top:6px;right:6px;background:none;border:none;cursor:pointer;color:var(--text-dim);font-size:12px;";
-  delWarn.addEventListener("click", async () => {
-    await db.ref("users/"+targetUid+"/warnings/"+warnId).remove();
-    item.remove();
-  });
-  item.appendChild(delWarn);
-  warnsList.appendChild(item);
-});
+        const item = document.createElement("div"); item.className="warn-item";
+        item.style.position="relative";
+        item.innerHTML = `<span class="warn-reason">${esc(w.reason)}</span><span class="warn-meta">by ${esc(w.by)} · ${new Date(w.at).toLocaleDateString()}</span>`;
+        const delWarn = document.createElement("button");
+        delWarn.textContent="✕"; delWarn.style.cssText="position:absolute;top:6px;right:6px;background:none;border:none;cursor:pointer;color:var(--text-dim);font-size:12px;";
+        delWarn.addEventListener("click", async () => {
+          await db.ref("users/"+targetUid+"/warnings/"+warnId).remove();
+          item.remove();
+        });
+        item.appendChild(delWarn);
+        warnsList.appendChild(item);
+      });
     } else {
       warnsSection.style.display = "";
       warnsList.innerHTML = '<div style="color:var(--text-dim);font-size:12px;">No warnings.</div>';
@@ -919,17 +1034,54 @@ if (userData.customRole && customRoles[userData.customRole]) {
   modal.onclick = e => { if (e.target === modal) modal.style.display = "none"; };
 }
 
+// Banner upload for own profile
+document.addEventListener("DOMContentLoaded", () => {
+  const bannerInput = $("bannerInput");
+  if (bannerInput) {
+    bannerInput.addEventListener("change", async () => {
+      const file = bannerInput.files[0]; if (!file) return;
+      bannerInput.value = "";
+      if (file.size > 5*1024*1024) return showToast("Image must be under 5MB","err");
+      showToast("Uploading banner...");
+      const url = await uploadImgBB(file);
+      if (!url) return showToast("Upload failed","err");
+      myBanner = url;
+      await db.ref("users/"+myUid).update({ bannerUrl: url });
+      showToast("Banner updated!","ok");
+    });
+  }
+});
+
+function formatMinutes(mins) {
+  if (mins < 60) return mins+"m";
+  const h = Math.floor(mins/60);
+  if (h < 24) return h+"h "+((mins%60))+"m";
+  return Math.floor(h/24)+"d "+((h%24))+"h";
+}
+
 // ============================================================
-// REP SYSTEM
+// REP SYSTEM (toggle)
 // ============================================================
-async function giveRep(targetUid, targetUsername) {
+async function toggleRep(targetUid, targetUsername, btn) {
   if (targetUid === myUid) return showToast("Can't rep yourself!","warn");
   const alreadySnap = await db.ref("users/"+targetUid+"/repGivenBy/"+myUid).once("value");
-  if (alreadySnap.exists()) return showToast("Already repped "+targetUsername+"!","warn");
-  await db.ref("users/"+targetUid+"/rep").transaction(cur => (cur||0)+1);
-  await db.ref("users/"+targetUid+"/repGivenBy/"+myUid).set(true);
-  showToast("⭐ Gave rep to "+targetUsername+"!","ok");
-  $("profileRep").textContent = (parseInt($("profileRep").textContent)||0)+1;
+  if (alreadySnap.exists()) {
+    // Remove rep
+    await db.ref("users/"+targetUid+"/rep").transaction(cur => Math.max(0,(cur||0)-1));
+    await db.ref("users/"+targetUid+"/repGivenBy/"+myUid).remove();
+    showToast("💔 Removed rep from "+targetUsername, "warn");
+    if (btn) { btn.textContent = "⭐ Give Rep"; }
+    const repEl = $("profileRep");
+    if (repEl) repEl.textContent = Math.max(0,(parseInt(repEl.textContent)||0)-1);
+  } else {
+    // Give rep
+    await db.ref("users/"+targetUid+"/rep").transaction(cur => (cur||0)+1);
+    await db.ref("users/"+targetUid+"/repGivenBy/"+myUid).set(true);
+    showToast("⭐ Gave rep to "+targetUsername+"!", "ok");
+    if (btn) { btn.textContent = "💔 Remove Rep"; }
+    const repEl = $("profileRep");
+    if (repEl) repEl.textContent = (parseInt(repEl.textContent)||0)+1;
+  }
 }
 
 // ============================================================
@@ -937,14 +1089,14 @@ async function giveRep(targetUid, targetUsername) {
 // ============================================================
 function setTyping(active) {
   if (!myUid) return;
-  if (currentChannel === "announcements" || currentChannel === "leaderboard") return;
+  if (currentChannel === "announcements" || currentChannel === "leaderboard" || currentChannel === "myleaderboard") return;
   const ref = db.ref("typing/"+currentChannel+"/"+myUid);
   active ? ref.set({ username: myUsername, ts: Date.now() }) : ref.remove();
 }
 
 function setupTypingListener(channel) {
   db.ref("typing/"+channel).off("value");
-  if (channel === "announcements" || channel === "leaderboard") { $("typingDisplay").textContent = ""; return; }
+  if (channel === "announcements" || channel === "leaderboard" || channel === "myleaderboard") { $("typingDisplay").textContent = ""; return; }
   db.ref("typing/"+channel).on("value", snap => {
     const typers = snap.val() || {};
     const names = Object.entries(typers)
@@ -991,21 +1143,13 @@ function setupSearch() {
   $("searchToggleBtn").addEventListener("click", () => {
     searchActive = !searchActive;
     $("searchBar").style.display = searchActive ? "flex" : "none";
-    if (searchActive) {
-      $("searchInput").focus();
-    } else {
-      $("searchInput").value = "";
-      clearSearchHighlights();
-    }
+    if (searchActive) $("searchInput").focus();
+    else { $("searchInput").value = ""; clearSearchHighlights(); }
   });
-
   $("searchClear").addEventListener("click", () => {
-    $("searchInput").value = "";
-    clearSearchHighlights();
-    $("searchBar").style.display = "none";
-    searchActive = false;
+    $("searchInput").value = ""; clearSearchHighlights();
+    $("searchBar").style.display = "none"; searchActive = false;
   });
-
   $("searchInput").addEventListener("input", () => {
     const query = $("searchInput").value.trim().toLowerCase();
     if (!query) { clearSearchHighlights(); return; }
@@ -1042,7 +1186,6 @@ function setupChannelButtons() {
 }
 
 function renderCustomChannelButtons() {
-  // Remove any previously rendered custom channel buttons
   document.querySelectorAll(".custom-ch-btn").forEach(b => b.remove());
   const $customSection = document.getElementById("customChannelsSection");
   if ($customSection) $customSection.remove();
@@ -1050,12 +1193,10 @@ function renderCustomChannelButtons() {
   const entries = Object.entries(customChannels);
   if (!entries.length) return;
 
-  // Check access per channel
   const canSeeChannel = (ch) => {
     if (!ch.private) return true;
     if (ch.requiredRole === "mod") return amOwner() || amMod();
     if (ch.requiredRole === "dev") return isDev(myUid) || amOwner();
-    // custom role check
     const myUserData = allUsersCache[myUid] || {};
     return amOwner() || myUserData.customRole === ch.requiredRole;
   };
@@ -1063,11 +1204,9 @@ function renderCustomChannelButtons() {
   const visible = entries.filter(([, ch]) => canSeeChannel(ch));
   if (!visible.length) return;
 
-  const sidebar = document.querySelector(".sidebar-section:last-of-type");
   const section = document.createElement("div");
   section.className = "sidebar-section";
   section.id = "customChannelsSection";
-
   const label = document.createElement("div");
   label.className = "sidebar-label";
   label.textContent = "💬 CUSTOM";
@@ -1078,28 +1217,14 @@ function renderCustomChannelButtons() {
     btn.className = "channel-btn custom-ch-btn";
     btn.dataset.channel = id;
     if (currentChannel === id) btn.classList.add("selected");
-
-    const icon = document.createElement("span");
-    icon.className = "ch-hash";
-    icon.textContent = ch.icon || "#";
-
-    const name = document.createElement("span");
-    name.className = "ch-name";
-    name.textContent = ch.name;
-
-    const pip = document.createElement("span");
-    pip.className = "unread-pip";
-    pip.id = "pip-" + id;
-    pip.style.display = "none";
-
-    btn.appendChild(icon);
-    btn.appendChild(name);
-    btn.appendChild(pip);
+    const icon = document.createElement("span"); icon.className = "ch-hash"; icon.textContent = ch.icon || "#";
+    const name = document.createElement("span"); name.className = "ch-name"; name.textContent = ch.name;
+    const pip = document.createElement("span"); pip.className = "unread-pip"; pip.id = "pip-" + id; pip.style.display = "none";
+    btn.appendChild(icon); btn.appendChild(name); btn.appendChild(pip);
     btn.addEventListener("click", () => switchChannel(id));
     section.appendChild(btn);
   });
 
-  // Insert after the general/builtin channels section (before online/friends)
   const allSections = [...document.querySelectorAll(".sidebar-section")];
   const generalSection = allSections.find(s => s.querySelector(".sidebar-label")?.textContent.includes("GENERAL"));
   const target = generalSection || allSections[0];
@@ -1123,7 +1248,11 @@ function switchChannel(ch) {
   userScrolledUp = false;
 
   document.querySelectorAll(".channel-btn").forEach(b => b.classList.toggle("selected", b.dataset.channel===ch));
-  const builtinLabels = { general:"general", offtopic:"off-topic", announcements:"announcements", modchat:"mod-chat", leaderboard:"leaderboard" };
+  const builtinLabels = {
+    general:"general", offtopic:"off-topic",
+    announcements:"announcements", modchat:"mod-chat",
+    leaderboard:"leaderboard", myleaderboard:"my leaderboard"
+  };
   const chLabel = builtinLabels[ch] || (customChannels[ch] ? customChannels[ch].name : ch);
   $("channelLabel").textContent = chLabel;
   $("msgInput").placeholder = "Message #" + chLabel;
@@ -1131,9 +1260,8 @@ function switchChannel(ch) {
 
   const isAnnouncements = ch === "announcements";
   const isModChat = ch === "modchat";
-  const isLeaderboard = ch === "leaderboard";
+  const isLeaderboard = ch === "leaderboard" || ch === "myleaderboard";
 
-  // Reset input visibility first
   $("inputRow").style.display = "flex";
   $("formatToolbar").style.display = "flex";
   $("typingBar").style.display = "block";
@@ -1152,10 +1280,8 @@ function switchChannel(ch) {
     $("formatToolbar").style.display = (amOwner() || amMod()) ? "flex" : "none";
   }
 
-  // Apply mute on top
   checkMuteStatus();
 
-	// Block input if private custom channel and user lacks access
   if (customChannels[ch]) {
     const chData = customChannels[ch];
     if (chData.private) {
@@ -1171,64 +1297,71 @@ function switchChannel(ch) {
     }
   }
 
-
   const oldNotice = $("announcementsNotice");
   if (!isAnnouncements && oldNotice) oldNotice.style.display = "none";
   if (isAnnouncements) updateAnnouncementsUI();
 
   setupTypingListener(ch);
 
-  if (isLeaderboard) {
-    renderLeaderboard();
-    leaderboardTimer = setInterval(renderLeaderboard, 5 * 60 * 1000);
+  if (ch === "leaderboard") {
+    renderLeaderboard(false);
+    leaderboardTimer = setInterval(() => renderLeaderboard(false), 5 * 60 * 1000);
+  } else if (ch === "myleaderboard") {
+    renderLeaderboard(true);
+    leaderboardTimer = setInterval(() => renderLeaderboard(true), 5 * 60 * 1000);
   } else {
     loadMessages(ch);
   }
 }
 
 // ============================================================
-// LEADERBOARD
+// LEADERBOARD (global + friends)
 // ============================================================
-async function renderLeaderboard() {
+async function renderLeaderboard(friendsOnly) {
   const chatbox = $("chatbox");
   chatbox.innerHTML = "";
+
+  // Tab switcher
+  const tabs = document.createElement("div"); tabs.className="lb-tabs";
+  const globalTab = document.createElement("button"); globalTab.className="lb-tab"+(friendsOnly?"":" active"); globalTab.textContent="🌍 Global";
+  const friendTab = document.createElement("button"); friendTab.className="lb-tab"+(friendsOnly?" active":""); friendTab.textContent="👥 Friends";
+  globalTab.addEventListener("click", () => { if(currentChannel!=="leaderboard") { switchChannel("leaderboard"); } else { renderLeaderboard(false); } });
+  friendTab.addEventListener("click", () => { if(currentChannel!=="myleaderboard") { switchChannel("myleaderboard"); } else { renderLeaderboard(true); } });
+  tabs.appendChild(globalTab); tabs.appendChild(friendTab);
+  chatbox.appendChild(tabs);
 
   const refreshBtn = document.createElement("button");
   refreshBtn.className = "leaderboard-refresh-btn";
   refreshBtn.textContent = "🔄 Refresh";
-  refreshBtn.addEventListener("click", renderLeaderboard);
+  refreshBtn.addEventListener("click", () => renderLeaderboard(friendsOnly));
   chatbox.appendChild(refreshBtn);
 
   const usersSnap = await db.ref("users").once("value");
   const users = usersSnap.val() || {};
-  const userList = Object.entries(users).map(([uid, d]) => ({ uid, ...d }));
+  let userList = Object.entries(users).map(([uid, d]) => ({ uid, ...d }));
+
+  if (friendsOnly) {
+    const friendUids = Object.keys(myFriends);
+    friendUids.push(myUid); // include self
+    userList = userList.filter(u => friendUids.includes(u.uid));
+    if (userList.length <= 1) {
+      const empty = document.createElement("div");
+      empty.style.cssText = "text-align:center;color:var(--text-dim);padding:40px 16px;font-size:14px;";
+      empty.textContent = "Add friends to see them on your leaderboard!";
+      chatbox.appendChild(empty);
+      return;
+    }
+  }
 
   const sections = [
-    {
-      title: "🥇 Most Messages Sent",
-      key: "messageCount",
-      label: "messages",
-      color: "#fbbf24"
-    },
-    {
-      title: "❤️ Most Reactions Received",
-      key: "reactionsReceived",
-      label: "reactions",
-      color: "#f472b6"
-    },
-    {
-      title: "⭐ Highest Rep",
-      key: "rep",
-      label: "rep",
-      color: "#a78bfa"
-    },
-    {
-      title: "📅 Most Days Active",
-      key: "_daysActive",
-      label: "days",
-      color: "#34d399",
-      compute: u => u.activeDays ? Object.keys(u.activeDays).length : 0
-    }
+    { title: "🥇 Most Messages Sent",    key: "messageCount",      label: "messages",  color: "#fbbf24" },
+    { title: "❤️ Most Reactions",        key: "reactionsReceived", label: "reactions", color: "#f472b6" },
+    { title: "⭐ Highest Rep",           key: "rep",               label: "rep",       color: "#a78bfa" },
+    { title: "📅 Most Days Active",      key: "_daysActive",       label: "days",      color: "#34d399", compute: u => u.activeDays ? Object.keys(u.activeDays).length : 0 },
+    { title: "⏱️ Most Time Online",      key: "timeOnlineMinutes", label: "min",       color: "#60a5fa", format: v => formatMinutes(v) },
+    { title: "🔥 Longest Streak",        key: "currentStreak",     label: "days",      color: "#fb923c" },
+    { title: "🗳️ Most Polls Voted",      key: "pollsVotedIn",      label: "votes",     color: "#e879f9" },
+    { title: "📸 Most Images Sent",      key: "imagesSent",        label: "images",    color: "#38bdf8" },
   ];
 
   sections.forEach(section => {
@@ -1251,14 +1384,18 @@ async function renderLeaderboard() {
 
     sorted.forEach((u, i) => {
       const row = document.createElement("div"); row.className = "lb-row";
+      const isSelf = u.uid === myUid;
+      if (isSelf) row.classList.add("lb-self");
       row.style.cursor = "pointer";
       row.addEventListener("click", () => openProfile(u.uid));
       const rank = document.createElement("span"); rank.className="lb-rank";
       rank.textContent = i===0?"🥇":i===1?"🥈":i===2?"🥉":"#"+(i+1);
       const av = buildAvatar(u.avatarUrl||null, u.username, u.color||"#4da6ff", 28);
-      const name = document.createElement("span"); name.className="lb-name"; name.textContent=u.username; name.style.color=u.color||"#4da6ff";
+      const name = document.createElement("span"); name.className="lb-name";
+      name.textContent = u.username+(isSelf?" (you)":""); name.style.color=u.color||"#4da6ff";
+      const displayVal = section.format ? section.format(u._score) : u._score.toLocaleString();
       const score = document.createElement("span"); score.className="lb-score"; score.style.color=section.color;
-      score.textContent = u._score.toLocaleString()+" "+section.label;
+      score.textContent = displayVal+" "+section.label;
       row.appendChild(rank); row.appendChild(av); row.appendChild(name); row.appendChild(score);
       wrapper.appendChild(row);
     });
@@ -1279,7 +1416,6 @@ function loadMessages(ch) {
     Object.entries(rawVal).forEach(([key, val]) => msgs.push({ key, ...val }));
     msgs.sort((a, b) => a.timestamp - b.timestamp);
 
-    const totalLoaded = msgs.length;
     msgs.forEach(m => {
       if (!displayedMsgs[ch]) displayedMsgs[ch] = new Set();
       if (displayedMsgs[ch].has(m.key)) return;
@@ -1287,7 +1423,7 @@ function loadMessages(ch) {
       renderMessage(m, ch, false);
     });
 
-    if (totalLoaded >= PAGE_SIZE && msgs.length > 0) {
+    if (msgs.length >= PAGE_SIZE && msgs.length > 0) {
       const loadBtn = document.createElement("button");
       loadBtn.className = "load-more-btn";
       loadBtn.textContent = "📜 Load older messages";
@@ -1333,8 +1469,7 @@ async function loadOlderMessages(ch, oldestKey, btn) {
   let insertAfter = btn;
   newWrappers.forEach(w => { insertAfter.after(w); insertAfter = w; });
   chatbox.scrollTop = chatbox.scrollHeight - prevH;
-  btn.textContent = "No more messages";
-  btn.disabled = true;
+  btn.textContent = "No more messages"; btn.disabled = true;
 }
 
 // ============================================================
@@ -1342,7 +1477,7 @@ async function loadOlderMessages(ch, oldestKey, btn) {
 // ============================================================
 function setupUnreadListeners() {
   getAllChannels().forEach(ch => {
-    if (ch===currentChannel || ch==="leaderboard") return;
+    if (ch===currentChannel || ch==="leaderboard" || ch==="myleaderboard") return;
     db.ref("messages/"+ch).off("child_added");
     const since = Date.now();
     db.ref("messages/"+ch).orderByChild("timestamp").startAt(since).on("child_added", () => {
@@ -1389,10 +1524,7 @@ function renderMessage(data, ch, isNew, prepend) {
   const canDel      = canDelete();
   const isAnnCh     = ch === "announcements";
 
-  // Handle poll type
-  if (data.type === "poll") {
-    return renderPollMessage(data, ch, isNew, prepend);
-  }
+  if (data.type === "poll") return renderPollMessage(data, ch, isNew, prepend);
 
   const wrapper = document.createElement("div");
   wrapper.className = "msg-wrapper "+(isMine?"mine":"other");
@@ -1409,7 +1541,6 @@ function renderMessage(data, ch, isNew, prepend) {
   bubble.dataset.channel   = ch;
   if (message && message.includes("@"+myUsername)) bubble.classList.add("mentioned");
 
-  // Reply quote
   if (replyTo) {
     const q = document.createElement("div"); q.className="reply-quote";
     const qName = document.createElement("span"); qName.className="reply-quote-name"; qName.textContent=replyTo.name;
@@ -1419,7 +1550,6 @@ function renderMessage(data, ch, isNew, prepend) {
     bubble.appendChild(q);
   }
 
-  // Header
   const header = document.createElement("div"); header.className="msg-header";
   const nameWrap = document.createElement("span"); nameWrap.className="msg-name-wrap";
 
@@ -1435,7 +1565,7 @@ function renderMessage(data, ch, isNew, prepend) {
     const badge = document.createElement("span"); badge.className="dev-badge";
     badge.textContent="[Dev]"; nameWrap.appendChild(badge);
   }
-const userDataForRole = allUsersCache[userId] || {};
+  const userDataForRole = allUsersCache[userId] || {};
   if (userDataForRole.customRole && customRoles[userDataForRole.customRole]) {
     const cr = customRoles[userDataForRole.customRole];
     const badge = document.createElement("span");
@@ -1457,7 +1587,6 @@ const userDataForRole = allUsersCache[userId] || {};
   header.appendChild(mtime);
   bubble.appendChild(header);
 
-  // Message content
   const textEl = document.createElement("div"); textEl.className="msg-text";
 
   if (data.type==="image" && data.imageUrl) {
@@ -1507,11 +1636,9 @@ const userDataForRole = allUsersCache[userId] || {};
   }
   bubble.appendChild(textEl);
 
-  // Reactions
   const reactionsEl = document.createElement("div"); reactionsEl.className="reactions";
   bubble.appendChild(reactionsEl);
 
-  // Action bar
   const actionBar = document.createElement("div"); actionBar.className="msg-action-bar";
 
   if (!isAnnCh || amOwner()) {
@@ -1526,8 +1653,7 @@ const userDataForRole = allUsersCache[userId] || {};
   reactBtn.addEventListener("click", e => { e.stopPropagation(); openEmojiPicker(key, ch, reactBtn); });
   actionBar.appendChild(reactBtn);
 
-  // Mod actions in action bar
-if (canDel) {
+  if (canDel) {
     const delBtn = document.createElement("button"); delBtn.className="msg-action-btn delete-btn";
     delBtn.textContent="🗑 Delete";
     delBtn.addEventListener("click", async e => {
@@ -1613,6 +1739,8 @@ function renderPollMessage(data, ch, isNew, prepend) {
   const optionsEl = document.createElement("div"); optionsEl.className="poll-options-display";
   pollEl.appendChild(optionsEl);
 
+  let hasVotedInThisPoll = false;
+
   function refreshPollDisplay(votesData) {
     optionsEl.innerHTML = "";
     const votes = votesData || {};
@@ -1633,6 +1761,12 @@ function renderPollMessage(data, ch, isNew, prepend) {
           db.ref("messages/"+ch+"/"+key+"/votes/"+myUid).remove();
         } else {
           db.ref("messages/"+ch+"/"+key+"/votes/"+myUid).set(i);
+          // Track poll vote stat (only first vote in this poll)
+          if (!hasVotedInThisPoll) {
+            hasVotedInThisPoll = true;
+            db.ref("users/"+myUid+"/pollsVotedIn").transaction(c => (c||0)+1);
+            checkAchievements();
+          }
         }
       });
       const bar = document.createElement("div"); bar.className="poll-bar-wrap";
@@ -1642,11 +1776,13 @@ function renderPollMessage(data, ch, isNew, prepend) {
       row.appendChild(btn); row.appendChild(bar); row.appendChild(pctEl);
       optionsEl.appendChild(row);
     });
+
+    // track whether user has voted
+    if (votes[myUid] !== undefined) hasVotedInThisPoll = true;
   }
 
   bubble.appendChild(pollEl);
 
-  // Delete for mods
   if (canDelete()) {
     const delBtn = document.createElement("button"); delBtn.className="poll-delete-btn";
     delBtn.textContent="🗑";
@@ -1673,14 +1809,126 @@ function renderPollMessage(data, ch, isNew, prepend) {
   db.ref("messages/"+ch+"/"+key+"/votes").on("value", snap => {
     refreshPollDisplay(snap.val()||{});
   });
-
   db.ref("messages/"+ch+"/"+key).on("value", snap => { if (!snap.exists()) wrapper.remove(); });
 
   if (isNew && !userScrolledUp) requestAnimationFrame(() => scrollToBottom(true));
 }
 
 // ============================================================
-// EMOJI PICKER
+// CUSTOM REACTIONS MANAGER
+// ============================================================
+function openCustomReactionsModal() {
+  let modal = $("customReactionsModal");
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = "customReactionsModal";
+    modal.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:400;backdrop-filter:blur(4px);";
+
+    const card = document.createElement("div");
+    card.className = "confirm-card";
+    card.style.width = "400px";
+    card.innerHTML = `
+      <div class="confirm-icon">😀</div>
+      <h3>My Custom Reactions</h3>
+      <p>Upload up to 3 custom emoji images. They'll appear in the reaction picker!</p>
+      <div id="customReactionSlots" style="display:flex;flex-direction:column;gap:12px;margin:16px 0;"></div>
+      <div class="confirm-btns">
+        <button class="confirm-btn cancel" id="customReactClose">Close</button>
+      </div>
+    `;
+    modal.appendChild(card);
+    document.body.appendChild(modal);
+    modal.addEventListener("click", e => { if (e.target === modal) modal.style.display = "none"; });
+    $("customReactClose").addEventListener("click", () => modal.style.display = "none");
+  }
+
+  const slots = $("customReactionSlots");
+  slots.innerHTML = "";
+
+  for (let i = 0; i < 3; i++) {
+    const reaction = myCustomReactions[i] || null;
+    const slot = document.createElement("div");
+    slot.style.cssText = "display:flex;align-items:center;gap:12px;background:var(--bg-lighter);border:1px solid var(--border);border-radius:10px;padding:10px 14px;";
+
+    const preview = document.createElement("div");
+    preview.style.cssText = "width:36px;height:36px;border-radius:8px;overflow:hidden;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:var(--bg-input);font-size:22px;";
+    if (reaction && reaction.url) {
+      const img = document.createElement("img");
+      img.src = reaction.url;
+      img.style.cssText = "width:100%;height:100%;object-fit:cover;";
+      preview.appendChild(img);
+    } else {
+      preview.textContent = "➕";
+    }
+
+    const info = document.createElement("div");
+    info.style.cssText = "flex:1;";
+    const nameInput = document.createElement("input");
+    nameInput.className = "settings-input";
+    nameInput.placeholder = "Reaction name (e.g. catjam)";
+    nameInput.maxLength = 20;
+    nameInput.value = reaction ? reaction.name : "";
+    nameInput.style.cssText = "width:100%;margin-bottom:6px;font-size:12px;padding:5px 8px;";
+    info.appendChild(nameInput);
+
+    const uploadBtn = document.createElement("button");
+    uploadBtn.className = "confirm-btn ok";
+    uploadBtn.style.cssText = "padding:5px 12px;font-size:12px;";
+    uploadBtn.textContent = reaction ? "🔄 Replace" : "📤 Upload";
+
+    const fileInput = document.createElement("input");
+    fileInput.type = "file"; fileInput.accept = "image/*"; fileInput.style.display = "none";
+    fileInput.addEventListener("change", async () => {
+      const file = fileInput.files[0]; if (!file) return;
+      if (file.size > 2*1024*1024) return showToast("Max 2MB per custom reaction","err");
+      uploadBtn.textContent = "Uploading..."; uploadBtn.disabled = true;
+      const url = await uploadImgBB(file);
+      uploadBtn.disabled = false;
+      if (!url) return showToast("Upload failed","err");
+      const name = nameInput.value.trim() || ("custom"+(i+1));
+      const updated = [...myCustomReactions];
+      updated[i] = { url, name };
+      await db.ref("users/"+myUid+"/customReactions").set(updated);
+      showToast("Custom reaction saved!","ok");
+      openCustomReactionsModal(); // refresh
+    });
+
+    uploadBtn.addEventListener("click", () => {
+      // Save name first
+      if (myCustomReactions[i]) {
+        const updated = [...myCustomReactions];
+        updated[i] = { ...updated[i], name: nameInput.value.trim() || updated[i].name };
+        db.ref("users/"+myUid+"/customReactions").set(updated);
+      }
+      fileInput.click();
+    });
+
+    // Remove button
+    if (reaction) {
+      const removeBtn = document.createElement("button");
+      removeBtn.className = "confirm-btn cancel";
+      removeBtn.style.cssText = "padding:5px 10px;font-size:12px;margin-left:4px;";
+      removeBtn.textContent = "✕";
+      removeBtn.addEventListener("click", async () => {
+        const updated = [...myCustomReactions];
+        updated.splice(i, 1);
+        await db.ref("users/"+myUid+"/customReactions").set(updated);
+        showToast("Reaction removed","ok");
+        openCustomReactionsModal();
+      });
+      slot.appendChild(preview); slot.appendChild(info); slot.appendChild(fileInput); slot.appendChild(uploadBtn); slot.appendChild(removeBtn);
+    } else {
+      slot.appendChild(preview); slot.appendChild(info); slot.appendChild(fileInput); slot.appendChild(uploadBtn);
+    }
+
+    slots.appendChild(slot);
+  }
+
+  modal.style.display = "flex";
+}
+
+// ============================================================
+// EMOJI PICKER (with custom reactions)
 // ============================================================
 function openEmojiPicker(msgId, ch, anchor) {
   closeAllEmojiPickers();
@@ -1692,6 +1940,53 @@ function openEmojiPicker(msgId, ch, anchor) {
     ["🫀","🧠","👁","🫶","🤝","✌️","🤌","🤰","🧌","🫃"],
   ];
   const popup = document.createElement("div"); popup.className="emoji-popup";
+
+  // Custom reactions section (if any)
+  // Show all users' custom reactions who are in allUsersCache
+  const allCustom = [];
+  Object.values(allUsersCache).forEach(u => {
+    if (u.customReactions && Array.isArray(u.customReactions)) {
+      u.customReactions.forEach(r => { if (r && r.url) allCustom.push(r); });
+    }
+  });
+  // Also add my own
+  myCustomReactions.forEach(r => { if (r && r.url && !allCustom.find(x => x.url === r.url)) allCustom.push(r); });
+
+  if (allCustom.length) {
+    const customLabel = document.createElement("div");
+    customLabel.style.cssText = "font-size:10px;font-weight:800;color:var(--text-dim);letter-spacing:.06em;text-transform:uppercase;padding:2px 4px 4px;";
+    customLabel.textContent = "Custom";
+    popup.appendChild(customLabel);
+
+    const customRow = document.createElement("div"); customRow.className="emoji-row"; customRow.style.flexWrap="wrap";
+    allCustom.forEach(r => {
+      const btn = document.createElement("button"); btn.className="emoji-btn custom-emoji-btn";
+      btn.title = ":"+r.name+":";
+      const img = document.createElement("img");
+      img.src = r.url;
+      img.style.cssText = "width:24px;height:24px;object-fit:cover;border-radius:4px;";
+      btn.appendChild(img);
+      btn.addEventListener("click", e => {
+        e.stopPropagation();
+        toggleCustomReaction(msgId, ch, r);
+        popup.remove();
+      });
+      customRow.appendChild(btn);
+    });
+    popup.appendChild(customRow);
+
+    const divider = document.createElement("div");
+    divider.style.cssText = "width:100%;height:1px;background:var(--border);margin:6px 0;";
+    popup.appendChild(divider);
+  }
+
+  // Manage custom reactions button
+  const manageBtn = document.createElement("button");
+  manageBtn.style.cssText = "display:block;width:100%;background:var(--bg-lighter);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:11px;font-weight:700;color:var(--text-muted);cursor:pointer;font-family:var(--font);margin-bottom:6px;";
+  manageBtn.textContent = "⚙️ Manage My Custom Reactions";
+  manageBtn.addEventListener("click", e => { e.stopPropagation(); popup.remove(); openCustomReactionsModal(); });
+  popup.appendChild(manageBtn);
+
   EMOJI_ROWS.forEach(row => {
     const rowEl = document.createElement("div"); rowEl.className="emoji-row";
     row.forEach(emoji => {
@@ -1701,8 +1996,9 @@ function openEmojiPicker(msgId, ch, anchor) {
     });
     popup.appendChild(rowEl);
   });
+
   document.body.appendChild(popup);
-  const pw=popup.offsetWidth||340, ph=popup.offsetHeight||210;
+  const pw=popup.offsetWidth||340, ph=popup.offsetHeight||240;
   const rect=anchor.getBoundingClientRect();
   const vw=window.innerWidth, vh=window.innerHeight;
   let top=rect.top-ph-8, left=rect.left+rect.width/2-pw/2;
@@ -1718,13 +2014,40 @@ function openEmojiPicker(msgId, ch, anchor) {
   }, 10);
 }
 
+// ============================================================
+// CUSTOM REACTION TOGGLE
+// ============================================================
+function toggleCustomReaction(msgId, ch, reaction) {
+  // Use a sanitized key from the image URL
+  const key = "custom_"+btoa(reaction.url).replace(/[^a-zA-Z0-9]/g,"").substring(0,20);
+  const ref = db.ref("messages/"+ch+"/"+msgId+"/reactions/"+key+"/"+myUid);
+  ref.once("value", async s => {
+    if (s.exists()) {
+      await ref.remove();
+      const msgSnap = await db.ref("messages/"+ch+"/"+msgId).once("value");
+      const msgData = msgSnap.val();
+      if (msgData && msgData.userId && msgData.userId !== myUid) {
+        db.ref("users/"+msgData.userId+"/reactionsReceived").transaction(c => Math.max(0,(c||0)-1));
+      }
+    } else {
+      // Store the full custom reaction info at the key level too for rendering
+      await db.ref("messages/"+ch+"/"+msgId+"/reactionsCustomMeta/"+key).set({ url: reaction.url, name: reaction.name });
+      await ref.set(true);
+      const msgSnap = await db.ref("messages/"+ch+"/"+msgId).once("value");
+      const msgData = msgSnap.val();
+      if (msgData && msgData.userId && msgData.userId !== myUid) {
+        db.ref("users/"+msgData.userId+"/reactionsReceived").transaction(c => (c||0)+1);
+      }
+    }
+  });
+}
+
 function toggleReaction(msgId, ch, emoji) {
   const key = [...emoji].map(c => c.codePointAt(0).toString(16)).join("_");
   const ref  = db.ref("messages/"+ch+"/"+msgId+"/reactions/"+key+"/"+myUid);
   ref.once("value", async s => {
     if (s.exists()) {
       await ref.remove();
-      // find message author and decrement
       const msgSnap = await db.ref("messages/"+ch+"/"+msgId).once("value");
       const msgData = msgSnap.val();
       if (msgData && msgData.userId && msgData.userId !== myUid) {
@@ -1743,27 +2066,44 @@ function toggleReaction(msgId, ch, emoji) {
 
 function renderReactions(container, reactions, msgId, ch, msgUserId) {
   container.innerHTML = "";
-  Object.entries(reactions).forEach(([key, users]) => {
-    const uids = Object.keys(users);
-    if (!uids.length) return;
-    const emoji   = key.split("_").map(cp => String.fromCodePoint(parseInt(cp,16))).join("");
-    const reacted = uids.includes(myUid);
-    const span = document.createElement("span");
-    span.className = "reaction"+(reacted?" reacted":"");
-    span.textContent = emoji+" "+uids.length;
-    // Track reactions received for leaderboard
-    if (reacted && msgUserId && msgUserId !== myUid) {
-      // Don't update here on every render — it's handled on toggle
-    }
-    span.addEventListener("mouseenter", () => {
-      const old=span.querySelector(".reaction-tooltip"); if(old) old.remove();
-      const names=uids.map(uid => { const u=allUsersCache[uid]; return u?u.username:(uid===myUid?myUsername:"Unknown"); });
-      const tip=document.createElement("div"); tip.className="reaction-tooltip"; tip.textContent=names.join(", ");
-      span.appendChild(tip);
+  // Fetch custom meta for this message
+  db.ref("messages/"+ch+"/"+msgId+"/reactionsCustomMeta").once("value", metaSnap => {
+    const customMeta = metaSnap.val() || {};
+    Object.entries(reactions).forEach(([key, users]) => {
+      const uids = Object.keys(users);
+      if (!uids.length) return;
+      const reacted = uids.includes(myUid);
+      const span = document.createElement("span");
+      span.className = "reaction"+(reacted?" reacted":"");
+
+      if (key.startsWith("custom_") && customMeta[key]) {
+        const img = document.createElement("img");
+        img.src = customMeta[key].url;
+        img.style.cssText = "width:18px;height:18px;object-fit:cover;border-radius:3px;vertical-align:middle;";
+        img.title = ":"+customMeta[key].name+":";
+        span.appendChild(img);
+        const countEl = document.createElement("span");
+        countEl.textContent = " "+uids.length;
+        span.appendChild(countEl);
+        span.addEventListener("click", e => {
+          e.stopPropagation();
+          toggleCustomReaction(msgId, ch, customMeta[key]);
+        });
+      } else {
+        const emoji = key.split("_").map(cp => String.fromCodePoint(parseInt(cp,16))).join("");
+        span.textContent = emoji+" "+uids.length;
+        span.addEventListener("click", e => { e.stopPropagation(); toggleReaction(msgId, ch, emoji); });
+      }
+
+      span.addEventListener("mouseenter", () => {
+        const old=span.querySelector(".reaction-tooltip"); if(old) old.remove();
+        const names=uids.map(uid => { const u=allUsersCache[uid]; return u?u.username:(uid===myUid?myUsername:"Unknown"); });
+        const tip=document.createElement("div"); tip.className="reaction-tooltip"; tip.textContent=names.join(", ");
+        span.appendChild(tip);
+      });
+      span.addEventListener("mouseleave", () => { const t=span.querySelector(".reaction-tooltip"); if(t) t.remove(); });
+      container.appendChild(span);
     });
-    span.addEventListener("mouseleave", () => { const t=span.querySelector(".reaction-tooltip"); if(t) t.remove(); });
-    span.addEventListener("click", e => { e.stopPropagation(); toggleReaction(msgId, ch, emoji); });
-    container.appendChild(span);
   });
 }
 
@@ -1878,7 +2218,7 @@ function setupAttachButton() {
 function sendImageMessage(imageUrl, isSpoiler) {
   if (currentChannel==="announcements" && !amOwner()) return;
   if (currentChannel==="modchat" && !amOwner() && !amMod()) return;
-  if (currentChannel==="leaderboard") return;
+  if (currentChannel==="leaderboard" || currentChannel==="myleaderboard") return;
   if (isMuted(myUid)) return showToast("You are muted!","warn");
   const now=Date.now();
   db.ref("messages/"+currentChannel).push({
@@ -1889,11 +2229,13 @@ function sendImageMessage(imageUrl, isSpoiler) {
   });
   db.ref("users/"+myUid).update({username:myUsername,color:myColor,avatarUrl:myAvatar||null});
   db.ref("users/"+myUid+"/messageCount").transaction(c=>(c||0)+1);
+  db.ref("users/"+myUid+"/imagesSent").transaction(c=>(c||0)+1);
+  checkAchievements();
 }
 
 function sendLinkMessage(url) {
   if (currentChannel==="announcements" && !amOwner()) return;
-  if (currentChannel==="leaderboard") return;
+  if (currentChannel==="leaderboard" || currentChannel==="myleaderboard") return;
   if (isMuted(myUid)) return showToast("You are muted!","warn");
   const now=Date.now();
   db.ref("messages/"+currentChannel).push({
@@ -1920,7 +2262,7 @@ function updateCharCounter() {
 }
 
 function handleTyping() {
-  if (currentChannel==="announcements"||currentChannel==="leaderboard") return;
+  if (currentChannel==="announcements"||currentChannel==="leaderboard"||currentChannel==="myleaderboard") return;
   if (!isTyping) { isTyping=true; setTyping(true); }
   clearTimeout(typingTimer);
   typingTimer=setTimeout(()=>{ isTyping=false; setTyping(false); },3000);
@@ -1935,7 +2277,7 @@ function openPollModal() {
   $("pollModal").style.display = "flex";
   $("pollQuestion").value = "";
   $("pollOptions").innerHTML = "";
-  ["Option 1","Option 2"].forEach((ph,i) => {
+  ["Option 1","Option 2"].forEach((ph) => {
     const inp = document.createElement("input");
     inp.className="poll-option-input settings-input"; inp.type="text"; inp.placeholder=ph; inp.maxLength=60;
     $("pollOptions").appendChild(inp);
@@ -2016,7 +2358,7 @@ function handleMentionSuggest() {
 function sendMessage() {
   if (currentChannel==="announcements" && !amOwner()) return;
   if (currentChannel==="modchat" && !amOwner() && !amMod()) return;
-  if (currentChannel==="leaderboard") return;
+  if (currentChannel==="leaderboard" || currentChannel==="myleaderboard") return;
   if (isMuted(myUid)) return showToast("You are muted!","warn");
 
   const now=Date.now();
@@ -2045,6 +2387,7 @@ function sendMessage() {
 
   db.ref("users/"+myUid).update({username:myUsername,color:myColor,avatarUrl:myAvatar||null});
   db.ref("users/"+myUid+"/messageCount").transaction(c=>(c||0)+1);
+  checkAchievements();
 }
 
 // ============================================================
@@ -2080,6 +2423,14 @@ function setupSettings() {
     setTimeout(()=>setMsg($("statusMsg"),"",true),2000);
   });
 
+  $("saveBioBtn").addEventListener("click", async ()=>{
+    const bio=$("bioInput").value.trim();
+    myBio=bio;
+    await db.ref("users/"+myUid+"/bio").set(bio);
+    setMsg($("bioMsg"),"✓ Bio updated!",true);
+    setTimeout(()=>setMsg($("bioMsg"),"",true),2000);
+  });
+
   const cp=$("colorPicker"); cp.value=myColor; $("colorLabel").textContent=myColor;
   cp.addEventListener("input", e=>{
     myColor=e.target.value; $("colorLabel").textContent=myColor;
@@ -2094,6 +2445,7 @@ function openSettings() {
   $("newUsernameInput").value=myUsername;
   $("colorPicker").value=myColor; $("colorLabel").textContent=myColor;
   $("statusInput").value=myStatus||"";
+  $("bioInput").value=myBio||"";
   checkUsernameCooldown();
 }
 function closeSettings(){ $("settingsOverlay").style.display="none"; }
