@@ -21,7 +21,7 @@ const IMGBB_KEY  = "7ae7b64cb4da961ab6a7d18d920099a8";
 const MAX_CHARS  = 250;
 const PAGE_SIZE  = 50;
 const WEEK_MS    = 7 * 24 * 60 * 60 * 1000;
-const BUILTIN_CHANNELS = ["general", "offtopic", "announcements", "modchat", "leaderboard", "myleaderboard"];
+const BUILTIN_CHANNELS = ["general","offtopic","announcements","modchat","leaderboard","myleaderboard","rules","achievements","members","logs","reports"];
 function getAllChannels() {
   return [...BUILTIN_CHANNELS, ...Object.keys(customChannels)];
 }
@@ -161,25 +161,80 @@ function buildInitialAvatar(username, color, size) {
 }
 
 // ============================================================
-// BAD WORD FILTER
+// BAD WORD / SLUR FILTER
 // ============================================================
 const BAD_WORDS = [
   "nigger","nigga","niga","niger","faggot","faggit","faget","chink","coon","gook",
   "kike","spic","wetback","fag","dyke","tranny","retard","retarded","spastic",
   "cracker","beaner","raghead","towelhead","zipperhead","slant","hymie","jigaboo",
-  "porch monkey","Uncle Tom","whitey","peckerwood","redneck","hillbilly",
+  "porchmoney","uncletom","whitey","peckerwood","redneck","hillbilly",
   "porn","xxx","hardcore","incest","bestiality","pedophile","pedo","lolita"
 ];
+
 function normalizeText(t) {
-  return t.toLowerCase()
-    .replace(/[=\s\-_.|*]+/g,"")
-    .replace(/[1!|]/g,"i").replace(/3/g,"e").replace(/0/g,"o")
-    .replace(/@/g,"a").replace(/5/g,"s").replace(/7/g,"t")
-    .replace(/\$/g,"s").replace(/\+/g,"t").replace(/ph/g,"f");
+  // Step 1: lowercase
+  let s = t.toLowerCase();
+  // Step 2: remove separators between letters (handles d-o-g, d.o.g, d o g etc.)
+  s = s.replace(/(.)\s*[-_.·•|*,;:'"`~^+=\/\\@#%&(){}<>[\]]\s*(?=.)/g, '$1');
+  // Step 3: collapse remaining whitespace
+  s = s.replace(/\s+/g,"");
+  // Step 4: leet speak substitutions
+  s = s.replace(/[1!|l]/g,"i")
+       .replace(/3/g,"e")
+       .replace(/0/g,"o")
+       .replace(/@/g,"a")
+       .replace(/[5$]/g,"s")
+       .replace(/[7+]/g,"t")
+       .replace(/ph/g,"f")
+       .replace(/[ck]/g,"c")
+       .replace(/vv/g,"w")
+       .replace(/x/g,"cs")
+       .replace(/[2z]/g,"z");
+  // Step 5: collapse repeated characters (heeello -> hello)
+  s = s.replace(/(.)\1{2,}/g,"$1$1");
+  return s;
 }
+
+function buildSlurRegex(word) {
+  // Build a regex that matches the word even with single separators between each letter
+  const sep = "[-_.·\\s*|,;:'`~^+\\/\\\\]*";
+  const chars = [...normalizeText(word)];
+  const pattern = chars.map(c => {
+    // Map back common leet variants
+    const variants = {"i":"[i1l!|]","e":"[e3]","o":"[o0]","a":"[a@4]","s":"[s5$]","t":"[t7+]","g":"[g9]","b":"[b8]","c":"[ck]"};
+    return variants[c] || c;
+  }).join(sep);
+  return new RegExp(pattern, "i");
+}
+
+const SLUR_REGEXES = BAD_WORDS.map(w => buildSlurRegex(w));
+
 function filterBadWords(msg) {
   const norm = normalizeText(msg);
-  return BAD_WORDS.some(w => norm.includes(normalizeText(w)));
+  // Check normalized version
+  if (BAD_WORDS.some(w => norm.includes(normalizeText(w)))) return true;
+  // Check regex patterns on original (catches spaced-out variants)
+  if (SLUR_REGEXES.some(re => re.test(msg))) return true;
+  return false;
+}
+
+async function applySlurTimeout(message) {
+  if (!myUid) return;
+  const duration = 30 * 60 * 1000; // 30 minutes
+  const until = Date.now() + duration;
+  await db.ref("config/muted/"+myUid).set({ until, by: "AutoMod", byUid: "system" });
+  // Log to mod logs
+  await db.ref("modLogs").push({
+    type: "auto_mute",
+    action: "Auto-muted 30min for slur",
+    targetUid: myUid,
+    targetUsername: myUsername,
+    by: "AutoMod",
+    byUid: "system",
+    message: message,
+    at: Date.now(),
+    timestamp: Date.now()
+  });
 }
 
 // ============================================================
@@ -251,8 +306,37 @@ $("showLoginBtn").addEventListener("click",  e => { e.preventDefault(); showCard
 });
 
 // ============================================================
-// SIGN IN
+// DEVICE FINGERPRINT (ban evasion prevention)
 // ============================================================
+function getDeviceFingerprint() {
+  const nav = window.navigator;
+  const parts = [
+    nav.userAgent, nav.language, nav.hardwareConcurrency,
+    screen.width+"x"+screen.height, screen.colorDepth,
+    nav.platform, Intl.DateTimeFormat().resolvedOptions().timeZone
+  ];
+  let hash = 0;
+  const str = parts.join("|");
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) - hash) + str.charCodeAt(i);
+    hash |= 0;
+  }
+  return "fp_" + Math.abs(hash).toString(36);
+}
+
+async function checkDeviceBan() {
+  const fp = getDeviceFingerprint();
+  const snap = await db.ref("config/deviceBans/"+fp).once("value");
+  return snap.exists() ? snap.val() : null;
+}
+
+async function registerDevice(uid) {
+  const fp = getDeviceFingerprint();
+  await db.ref("users/"+uid+"/devices/"+fp).set({ lastSeen: Date.now() });
+  await db.ref("config/deviceToUser/"+fp).set(uid);
+}
+
+
 $("loginBtn").addEventListener("click", async () => {
   clearError("loginError");
   const username = $("loginUsername").value.trim();
@@ -305,13 +389,28 @@ auth.onAuthStateChanged(async user => {
 
   const banSnap = await db.ref("config/banned/"+user.uid).once("value");
   if (banSnap.exists()) {
+    // Also ban this device fingerprint
+    const fp = getDeviceFingerprint();
     const banData = banSnap.val();
+    await db.ref("config/deviceBans/"+fp).set({ uid: user.uid, reason: banData.reason, at: banData.at||Date.now() });
     $("authScreen").style.display = "none";
     $("loadingScreen").style.display = "none";
     $("appContainer").style.display = "none";
     $("banScreen").style.display = "flex";
     $("banReason").textContent = banData.reason || "No reason given.";
     $("banBy").textContent = banData.by || "a moderator";
+    return;
+  }
+
+  // Check if this device is fingerprint-banned (new account evasion)
+  const deviceBan = await checkDeviceBan();
+  if (deviceBan) {
+    $("authScreen").style.display = "none";
+    $("loadingScreen").style.display = "none";
+    $("appContainer").style.display = "none";
+    $("banScreen").style.display = "flex";
+    $("banReason").textContent = (deviceBan.reason || "Ban evasion detected.") + " (Device banned)";
+    $("banBy").textContent = "AutoMod";
     return;
   }
 
@@ -327,6 +426,9 @@ auth.onAuthStateChanged(async user => {
   myStatus   = data.status   || "";
   myBio      = data.bio      || "";
   myBanner   = data.bannerUrl || null;
+  const savedBgUrl = data.bgImageUrl || null;
+  if (savedBgUrl) { localStorage.setItem("snc_bg_image", savedBgUrl); }
+  else { /* keep localStorage value if any */ }
 
   db.ref("config/ownerUid").once("value", ownerSnap => {
     if (ownerSnap.val()) {
@@ -373,6 +475,16 @@ auth.onAuthStateChanged(async user => {
 
   checkPendingWarnNotification();
   updateStreakAndDay();
+  registerDevice(myUid);
+
+  // Multi-tab / multi-account detection: mark session in sessionStorage
+  const sessionKey = "snc_session_uid";
+  const existingSession = sessionStorage.getItem(sessionKey);
+  if (existingSession && existingSession !== user.uid) {
+    // Different UID in same tab session - force sign out of previous
+    console.log("Session UID mismatch - enforcing single session");
+  }
+  sessionStorage.setItem(sessionKey, user.uid);
 
   $("authScreen").style.display = "none";
   startApp();
@@ -490,6 +602,10 @@ function startApp() {
   });
   db.ref("users/"+myUid+"/friends").on("value", snap => {
     myFriends = snap.val() || {};
+    // refresh friends modal if open
+    if ($("friendsModal") && $("friendsModal").style.display !== "none" && friendsModalTab === "friends") {
+      renderFriendsModalTab("friends");
+    }
   });
   db.ref("friendRequests/"+myUid).on("value", snap => {
     renderFriendRequests(snap.val() || {});
@@ -507,6 +623,7 @@ function runLoadingBar() {
         $("loadingScreen").style.display = "none";
         $("appContainer").style.display = "flex";
         setupApp();
+        applyBackgroundImage(localStorage.getItem("snc_bg_image")||null);
         setTimeout(() => { userScrolledUp = false; scrollToBottom(true); }, 120);
       }, 200);
     }
@@ -531,12 +648,17 @@ function setupApp() {
   setupUnreadListeners();
   startOnlineTimer();
 
-  // Logo click → my leaderboard / stats
+  // Logo click → leaderboard
   const logoBtn = document.querySelector(".sidebar-header");
   if (logoBtn) {
     logoBtn.style.cursor = "pointer";
-    logoBtn.addEventListener("click", () => switchChannel("myleaderboard"));
+    logoBtn.addEventListener("click", () => switchChannel("leaderboard"));
   }
+
+  // Friends button → open friends modal
+  const friendsBtn = $("friendsBtn");
+  if (friendsBtn) friendsBtn.addEventListener("click", openFriendsModal);
+  setupFriendsModal();
 
   $("chatbox").addEventListener("scroll", function() {
     const dist = this.scrollHeight - this.scrollTop - this.clientHeight;
@@ -597,6 +719,13 @@ async function muteUser(targetUid, targetUsername) {
           by: myUsername,
           byUid: myUid
         });
+        // Log mute action
+        await db.ref("modLogs").push({
+          type:"mute", action:"Muted user for "+(dur/60000)+" minutes",
+          targetUid, targetUsername,
+          by: myUsername, byUid: myUid,
+          duration: dur, at: Date.now(), timestamp: Date.now()
+        });
         showToast("🔇 "+targetUsername+" has been muted", "ok");
         resolve(true);
       };
@@ -613,11 +742,21 @@ async function banUser(targetUid, targetUsername) {
   if (reason === null) return;
   const ok = await showConfirm("🔨","Ban "+targetUsername,"This will prevent them from accessing the chat.");
   if (!ok) return;
-  await db.ref("config/banned/"+targetUid).set({
-    reason: reason || "No reason given.",
-    by: myUsername,
-    byUid: myUid,
-    at: Date.now()
+  const banData = { reason: reason || "No reason given.", by: myUsername, byUid: myUid, at: Date.now() };
+  await db.ref("config/banned/"+targetUid).set(banData);
+  // Also device-ban all known fingerprints for this user
+  const devSnap = await db.ref("users/"+targetUid+"/devices").once("value");
+  if (devSnap.exists()) {
+    const updates = {};
+    Object.keys(devSnap.val()).forEach(fp => {
+      updates["config/deviceBans/"+fp] = { uid: targetUid, reason: banData.reason, at: banData.at };
+    });
+    await db.ref().update(updates);
+  }
+  // Log to mod logs
+  await db.ref("modLogs").push({
+    type:"ban", action:"Banned user", targetUid, targetUsername,
+    by: myUsername, byUid: myUid, reason: banData.reason, at: Date.now(), timestamp: Date.now()
   });
   showToast("🔨 "+targetUsername+" has been banned", "ok");
 }
@@ -782,33 +921,179 @@ async function sendFriendRequest(targetUid) {
   showToast("Friend request sent!","ok");
 }
 
-function renderFriendRequests(requests) {
-  const list = $("friendRequestsList");
-  const badge = $("friendRequestBadge");
-  const entries = Object.entries(requests);
-  list.innerHTML = "";
-  if (!entries.length) { badge.style.display="none"; return; }
-  badge.style.display = "inline-flex";
-  badge.textContent = entries.length;
-  entries.forEach(([fromUid, data]) => {
-    const row = document.createElement("div"); row.className = "friend-request-row";
-    const av = buildAvatar(data.avatarUrl||null, data.username, data.color||"#4da6ff", 22);
-    const name = document.createElement("span"); name.className="online-name"; name.textContent=data.username; name.style.color=data.color||"#4da6ff";
-    const acceptBtn = document.createElement("button"); acceptBtn.className="friend-accept-btn"; acceptBtn.textContent="✅";
-    const declineBtn = document.createElement("button"); declineBtn.className="friend-decline-btn"; declineBtn.textContent="❌";
-    acceptBtn.addEventListener("click", async () => {
-      await db.ref("users/"+myUid+"/friends/"+fromUid).set({ addedAt: Date.now(), nickname: "" });
-      await db.ref("users/"+fromUid+"/friends/"+myUid).set({ addedAt: Date.now(), nickname: "" });
-      await db.ref("friendRequests/"+myUid+"/"+fromUid).remove();
-      showToast("You are now friends with "+data.username+"!","ok");
-      checkAchievements();
+// ============================================================
+// FRIENDS MODAL
+// ============================================================
+let friendsModalTab = "friends";
+let myOutgoingRequests = {}; // requests I've sent
+
+function openFriendsModal() {
+  $("friendsModal").style.display = "flex";
+  renderFriendsModalTab(friendsModalTab);
+}
+
+function setupFriendsModal() {
+  $("friendsModalClose").addEventListener("click", () => { $("friendsModal").style.display = "none"; });
+  $("friendsModal").addEventListener("click", e => { if (e.target === $("friendsModal")) $("friendsModal").style.display = "none"; });
+  document.querySelectorAll(".friends-tab").forEach(tab => {
+    tab.addEventListener("click", () => {
+      document.querySelectorAll(".friends-tab").forEach(t => t.classList.remove("active"));
+      tab.classList.add("active");
+      friendsModalTab = tab.dataset.tab;
+      renderFriendsModalTab(friendsModalTab);
     });
-    declineBtn.addEventListener("click", async () => {
-      await db.ref("friendRequests/"+myUid+"/"+fromUid).remove();
-    });
-    row.appendChild(av); row.appendChild(name); row.appendChild(acceptBtn); row.appendChild(declineBtn);
-    list.appendChild(row);
   });
+
+  // Listen for outgoing requests I've sent
+  db.ref("friendRequests").on("value", snap => {
+    myOutgoingRequests = {};
+    const all = snap.val() || {};
+    Object.entries(all).forEach(([targetUid, requests]) => {
+      if (requests[myUid]) myOutgoingRequests[targetUid] = requests[myUid];
+    });
+    if ($("friendsModal").style.display !== "none" && friendsModalTab === "outgoing") {
+      renderFriendsModalTab("outgoing");
+    }
+  });
+}
+
+async function renderFriendsModalTab(tab) {
+  const body = $("friendsModalBody");
+  body.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px;">Loading...</div>';
+
+  if (tab === "friends") {
+    const entries = Object.entries(myFriends);
+    if (!entries.length) {
+      body.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim);font-size:13px;">No friends yet. Add someone from their profile!</div>';
+      return;
+    }
+    const presSnap = await db.ref("presence").once("value");
+    const online = presSnap.val() || {};
+    body.innerHTML = "";
+    // Sort: online first
+    entries.sort(([a],[b]) => (!!online[b] - !!online[a]));
+    entries.forEach(([uid, friendData]) => {
+      const u = allUsersCache[uid] || {};
+      const isOnline = !!online[uid];
+      const row = document.createElement("div"); row.className = "fm-row";
+      const av = buildAvatar(u.avatarUrl||null, u.username||"?", u.color||"#4da6ff", 38);
+      const info = document.createElement("div"); info.className = "fm-info";
+      const nameEl = document.createElement("div"); nameEl.className = "fm-name";
+      nameEl.textContent = friendData.nickname || u.username || "Unknown";
+      nameEl.style.color = u.color||"#4da6ff";
+      const statusEl = document.createElement("div"); statusEl.className = "fm-status";
+      statusEl.innerHTML = isOnline
+        ? '<span style="color:#23d160;">● Online</span>'
+        : '<span style="color:var(--text-dim);">○ Offline</span>';
+      if (u.status) statusEl.innerHTML += ` · ${esc(u.status)}`;
+      info.appendChild(nameEl); info.appendChild(statusEl);
+      const btns = document.createElement("div"); btns.className = "fm-btns";
+      const profileBtn = document.createElement("button"); profileBtn.className = "confirm-btn ok fm-btn";
+      profileBtn.textContent = "Profile";
+      profileBtn.addEventListener("click", () => { $("friendsModal").style.display="none"; openProfile(uid); });
+      const removeBtn = document.createElement("button"); removeBtn.className = "confirm-btn cancel fm-btn";
+      removeBtn.textContent = "Remove";
+      removeBtn.addEventListener("click", async () => {
+        const ok = await showConfirm("🤝","Remove Friend","Remove "+(u.username||"this user")+" from your friends?");
+        if (!ok) return;
+        await db.ref("users/"+myUid+"/friends/"+uid).remove();
+        await db.ref("users/"+uid+"/friends/"+myUid).remove();
+        showToast("Friend removed.","ok");
+        renderFriendsModalTab("friends");
+      });
+      btns.appendChild(profileBtn); btns.appendChild(removeBtn);
+      row.appendChild(av); row.appendChild(info); row.appendChild(btns);
+      body.appendChild(row);
+    });
+
+  } else if (tab === "incoming") {
+    const snap = await db.ref("friendRequests/"+myUid).once("value");
+    const requests = snap.val() || {};
+    const entries = Object.entries(requests);
+    if (!entries.length) {
+      body.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim);font-size:13px;">No incoming requests.</div>';
+      return;
+    }
+    body.innerHTML = "";
+    entries.forEach(([fromUid, data]) => {
+      const row = document.createElement("div"); row.className = "fm-row";
+      const av = buildAvatar(data.avatarUrl||null, data.username||"?", data.color||"#4da6ff", 38);
+      const info = document.createElement("div"); info.className = "fm-info";
+      const nameEl = document.createElement("div"); nameEl.className = "fm-name";
+      nameEl.textContent = data.username||"Unknown"; nameEl.style.color = data.color||"#4da6ff";
+      const timeEl = document.createElement("div"); timeEl.className = "fm-status";
+      timeEl.textContent = "Sent " + new Date(data.sentAt||Date.now()).toLocaleDateString();
+      info.appendChild(nameEl); info.appendChild(timeEl);
+      const btns = document.createElement("div"); btns.className = "fm-btns";
+      const acceptBtn = document.createElement("button"); acceptBtn.className = "confirm-btn ok fm-btn";
+      acceptBtn.textContent = "✅ Accept";
+      acceptBtn.addEventListener("click", async () => {
+        await db.ref("users/"+myUid+"/friends/"+fromUid).set({ addedAt: Date.now(), nickname: "" });
+        await db.ref("users/"+fromUid+"/friends/"+myUid).set({ addedAt: Date.now(), nickname: "" });
+        await db.ref("friendRequests/"+myUid+"/"+fromUid).remove();
+        showToast("Now friends with "+data.username+"!","ok");
+        checkAchievements();
+        renderFriendsModalTab("incoming");
+      });
+      const declineBtn = document.createElement("button"); declineBtn.className = "confirm-btn cancel fm-btn";
+      declineBtn.textContent = "❌ Decline";
+      declineBtn.addEventListener("click", async () => {
+        await db.ref("friendRequests/"+myUid+"/"+fromUid).remove();
+        renderFriendsModalTab("incoming");
+      });
+      btns.appendChild(acceptBtn); btns.appendChild(declineBtn);
+      row.appendChild(av); row.appendChild(info); row.appendChild(btns);
+      body.appendChild(row);
+    });
+
+  } else if (tab === "outgoing") {
+    const entries = Object.entries(myOutgoingRequests);
+    if (!entries.length) {
+      body.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim);font-size:13px;">No pending outgoing requests.</div>';
+      return;
+    }
+    body.innerHTML = "";
+    entries.forEach(([targetUid, data]) => {
+      const u = allUsersCache[targetUid] || {};
+      const row = document.createElement("div"); row.className = "fm-row";
+      const av = buildAvatar(u.avatarUrl||null, u.username||"?", u.color||"#4da6ff", 38);
+      const info = document.createElement("div"); info.className = "fm-info";
+      const nameEl = document.createElement("div"); nameEl.className = "fm-name";
+      nameEl.textContent = u.username||"Unknown"; nameEl.style.color = u.color||"#4da6ff";
+      const timeEl = document.createElement("div"); timeEl.className = "fm-status";
+      timeEl.textContent = "Pending…";
+      info.appendChild(nameEl); info.appendChild(timeEl);
+      const btns = document.createElement("div"); btns.className = "fm-btns";
+      const cancelBtn = document.createElement("button"); cancelBtn.className = "confirm-btn cancel fm-btn";
+      cancelBtn.textContent = "Cancel";
+      cancelBtn.addEventListener("click", async () => {
+        await db.ref("friendRequests/"+targetUid+"/"+myUid).remove();
+        showToast("Request cancelled.","ok");
+        renderFriendsModalTab("outgoing");
+      });
+      btns.appendChild(cancelBtn);
+      row.appendChild(av); row.appendChild(info); row.appendChild(btns);
+      body.appendChild(row);
+    });
+  }
+}
+
+function renderFriendRequests(requests) {
+  // Update badge count on the sidebar Friends button
+  const badge = $("friendRequestBadge");
+  const incomingBadge = $("incomingBadge");
+  const count = Object.keys(requests).length;
+  if (count > 0) {
+    if (badge) { badge.style.display="inline-flex"; badge.textContent=count; }
+    if (incomingBadge) { incomingBadge.style.display="inline-flex"; incomingBadge.textContent=count; }
+  } else {
+    if (badge) badge.style.display="none";
+    if (incomingBadge) incomingBadge.style.display="none";
+  }
+  // Refresh modal if open on incoming tab
+  if ($("friendsModal").style.display !== "none" && friendsModalTab === "incoming") {
+    renderFriendsModalTab("incoming");
+  }
 }
 
 function openNicknameModal(friendUid, currentNickname) {
@@ -844,16 +1129,18 @@ async function openProfile(targetUid) {
     }
   }
 
-  // Avatar
+  // Avatar — sits on top of banner
   const avWrap = $("profileAvatar");
   avWrap.innerHTML = "";
-  avWrap.appendChild(buildAvatar(userData.avatarUrl||null, username, color, 64));
+  const avEl = buildAvatar(userData.avatarUrl||null, username, color, 72);
+  avEl.style.cssText = `width:72px;height:72px;border-radius:50%;border:4px solid var(--bg-dark);display:block;`;
+  avWrap.appendChild(avEl);
 
   // Name
   $("profileName").textContent = username;
   $("profileName").style.color = color;
 
-  // Badges
+  // Badges (roles only)
   const badgesEl = $("profileBadges"); badgesEl.innerHTML = "";
   if (isOwner(targetUid)) { const b=document.createElement("span"); b.className="owner-badge"; b.textContent="[Owner]"; badgesEl.appendChild(b); }
   if (isMod(targetUid))   { const b=document.createElement("span"); b.className="mod-badge"; b.textContent="[Mod]"; badgesEl.appendChild(b); }
@@ -865,19 +1152,6 @@ async function openProfile(targetUid) {
     b.style.cssText = `font-size:10px;font-weight:800;padding:2px 6px;border-radius:3px;background:${cr.color}22;color:${cr.color};border:1px solid ${cr.color}55;`;
     badgesEl.appendChild(b);
   }
-
-  // Achievement badges on profile
-  const achSnap = await db.ref("users/"+targetUid+"/achievements").once("value");
-  const userAchs = achSnap.val() || {};
-  const achRow = document.createElement("div"); achRow.style.cssText="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;";
-  ACHIEVEMENTS.filter(a => userAchs[a.id]).forEach(a => {
-    const span = document.createElement("span");
-    span.title = a.name+": "+a.desc;
-    span.style.cssText="font-size:18px;cursor:default;";
-    span.textContent = a.icon;
-    achRow.appendChild(span);
-  });
-  badgesEl.appendChild(achRow);
 
   // Status
   $("profileStatus").textContent = userData.status ? "💬 "+userData.status : "";
@@ -938,6 +1212,15 @@ async function openProfile(targetUid) {
     }
 
     if (canModerate() && !isOwner(targetUid)) {
+      // Mod actions separator
+      const modDivider = document.createElement("div");
+      modDivider.style.cssText = "width:100%;border-top:1px solid var(--border);margin:6px 0 2px;padding-top:4px;";
+      const modLabel = document.createElement("div");
+      modLabel.style.cssText = "font-size:9px;font-weight:800;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px;width:100%;";
+      modLabel.textContent = "🛡️ Mod Actions";
+      actionsEl.appendChild(modDivider);
+      actionsEl.appendChild(modLabel);
+
       const warnBtn = document.createElement("button"); warnBtn.className="profile-action-btn warn-btn";
       warnBtn.textContent = "⚠️ Warn";
       warnBtn.addEventListener("click", async () => {
@@ -992,11 +1275,7 @@ async function openProfile(targetUid) {
       }
     }
   } else {
-    // Own profile — show banner upload button
-    const bannerBtn = document.createElement("button"); bannerBtn.className="profile-action-btn";
-    bannerBtn.textContent = "🖼️ Change Banner";
-    bannerBtn.addEventListener("click", () => { $("bannerInput").click(); });
-    actionsEl.appendChild(bannerBtn);
+    // Own profile — no extra actions needed (banner is in settings)
   }
 
   // Warn history (mods/owner only)
@@ -1181,6 +1460,7 @@ function clearSearchHighlights() {
 // ============================================================
 function setupChannelButtons() {
   document.querySelectorAll(".channel-btn").forEach(btn => {
+    if (!btn.dataset.channel) return; // skip non-channel buttons (e.g. friendsBtn)
     btn.addEventListener("click", () => switchChannel(btn.dataset.channel));
   });
 }
@@ -1232,6 +1512,7 @@ function renderCustomChannelButtons() {
 }
 
 function switchChannel(ch) {
+  if (!ch) return; // guard against undefined (e.g. buttons without data-channel)
   if (msgListeners[currentChannel]) {
     try { msgListeners[currentChannel].ref.off("child_added", msgListeners[currentChannel].fn); } catch(e){}
     delete msgListeners[currentChannel];
@@ -1251,7 +1532,9 @@ function switchChannel(ch) {
   const builtinLabels = {
     general:"general", offtopic:"off-topic",
     announcements:"announcements", modchat:"mod-chat",
-    leaderboard:"leaderboard", myleaderboard:"my leaderboard"
+    leaderboard:"leaderboard", myleaderboard:"my leaderboard",
+    rules:"rules", achievements:"achievements", members:"members",
+    logs:"mod-logs", reports:"reports"
   };
   const chLabel = builtinLabels[ch] || (customChannels[ch] ? customChannels[ch].name : ch);
   $("channelLabel").textContent = chLabel;
@@ -1259,19 +1542,21 @@ function switchChannel(ch) {
   const pip = $("pip-"+ch); if(pip) pip.style.display="none";
 
   const isAnnouncements = ch === "announcements";
+  const isRules = ch === "rules";
   const isModChat = ch === "modchat";
   const isLeaderboard = ch === "leaderboard" || ch === "myleaderboard";
+  const isSpecialReadOnly = ch === "achievements" || ch === "members" || ch === "logs" || ch === "reports";
 
   $("inputRow").style.display = "flex";
   $("formatToolbar").style.display = "flex";
   $("typingBar").style.display = "block";
   $("muteNotice").style.display = "none";
 
-  if (isLeaderboard) {
+  if (isLeaderboard || isSpecialReadOnly) {
     $("inputRow").style.display = "none";
     $("formatToolbar").style.display = "none";
     $("typingBar").style.display = "none";
-  } else if (isAnnouncements) {
+  } else if (isAnnouncements || isRules) {
     $("inputRow").style.display = amOwner() ? "flex" : "none";
     $("formatToolbar").style.display = amOwner() ? "flex" : "none";
     $("typingBar").style.display = "none";
@@ -1298,8 +1583,9 @@ function switchChannel(ch) {
   }
 
   const oldNotice = $("announcementsNotice");
-  if (!isAnnouncements && oldNotice) oldNotice.style.display = "none";
+  if (!isAnnouncements && !isRules && oldNotice) oldNotice.style.display = "none";
   if (isAnnouncements) updateAnnouncementsUI();
+  if (isRules) updateRulesUI();
 
   setupTypingListener(ch);
 
@@ -1309,6 +1595,14 @@ function switchChannel(ch) {
   } else if (ch === "myleaderboard") {
     renderLeaderboard(true);
     leaderboardTimer = setInterval(() => renderLeaderboard(true), 5 * 60 * 1000);
+  } else if (ch === "achievements") {
+    renderAchievementsChannel();
+  } else if (ch === "members") {
+    renderMembersChannel();
+  } else if (ch === "logs") {
+    renderLogsChannel();
+  } else if (ch === "reports") {
+    renderReportsChannel();
   } else {
     loadMessages(ch);
   }
@@ -1405,8 +1699,257 @@ async function renderLeaderboard(friendsOnly) {
 }
 
 // ============================================================
-// LOAD MESSAGES
+// RULES CHANNEL UI
 // ============================================================
+function updateRulesUI() {
+  if (currentChannel !== "rules") return;
+  const isWriter = amOwner();
+  if (!isMuted(myUid)) {
+    $("inputRow").style.display     = isWriter ? "flex" : "none";
+    $("formatToolbar").style.display = isWriter ? "flex" : "none";
+  }
+  $("replyBar").style.display = "none";
+  let notice = $("rulesNotice");
+  if (!isWriter) {
+    if (!notice) {
+      notice = document.createElement("div");
+      notice.id = "rulesNotice";
+      notice.className = "announcements-notice";
+      notice.innerHTML = "📜 <strong>Rules</strong> — Only the Owner can post here.";
+      $("chatArea").appendChild(notice);
+    }
+    notice.style.display = "flex";
+  } else {
+    if (notice) notice.style.display = "none";
+  }
+}
+
+// ============================================================
+// ACHIEVEMENTS CHANNEL
+// ============================================================
+async function renderAchievementsChannel() {
+  const chatbox = $("chatbox");
+  chatbox.innerHTML = "";
+
+  const achSnap = await db.ref("users/"+myUid+"/achievements").once("value");
+  const myAchs = achSnap.val() || {};
+
+  const title = document.createElement("div");
+  title.style.cssText = "padding:20px 16px 8px;font-size:18px;font-weight:800;color:var(--text-primary);";
+  title.textContent = "🏅 All Achievements";
+  chatbox.appendChild(title);
+
+  const sub = document.createElement("div");
+  sub.style.cssText = "padding:0 16px 16px;font-size:12px;color:var(--text-muted);";
+  sub.textContent = "Complete these to earn badges on your profile.";
+  chatbox.appendChild(sub);
+
+  ACHIEVEMENTS.forEach(ach => {
+    const have = !!myAchs[ach.id];
+    const row = document.createElement("div");
+    row.style.cssText = `display:flex;align-items:center;gap:14px;padding:12px 16px;margin:4px 12px;border-radius:10px;background:var(--bg-lighter);border:1px solid ${have?"var(--accent)":"var(--border)"};opacity:${have?1:0.55};`;
+
+    const icon = document.createElement("div");
+    icon.style.cssText = "font-size:28px;width:40px;text-align:center;flex-shrink:0;";
+    icon.textContent = ach.icon;
+
+    const info = document.createElement("div");
+    info.style.flex = "1";
+    const name = document.createElement("div");
+    name.style.cssText = "font-weight:800;font-size:14px;color:var(--text-primary);";
+    name.textContent = ach.name;
+    const desc = document.createElement("div");
+    desc.style.cssText = "font-size:12px;color:var(--text-muted);margin-top:2px;";
+    desc.textContent = ach.desc;
+    info.appendChild(name); info.appendChild(desc);
+
+    const status = document.createElement("div");
+    status.style.cssText = `font-size:11px;font-weight:800;padding:4px 10px;border-radius:6px;flex-shrink:0;${have?"background:var(--accent)22;color:var(--accent)":"background:var(--bg-input);color:var(--text-dim)"}`;
+    status.textContent = have ? "✅ Earned" : "🔒 Locked";
+
+    row.appendChild(icon); row.appendChild(info); row.appendChild(status);
+    chatbox.appendChild(row);
+  });
+}
+
+// ============================================================
+// MEMBERS CHANNEL
+// ============================================================
+async function renderMembersChannel() {
+  const chatbox = $("chatbox");
+  chatbox.innerHTML = '<div style="padding:16px;color:var(--text-muted);font-size:12px;">Loading members...</div>';
+
+  const usersSnap = await db.ref("users").once("value");
+  const users = usersSnap.val() || {};
+  const presSnap = await db.ref("presence").once("value");
+  const online = presSnap.val() || {};
+
+  chatbox.innerHTML = "";
+
+  const title = document.createElement("div");
+  title.style.cssText = "padding:20px 16px 8px;font-size:18px;font-weight:800;color:var(--text-primary);";
+  title.textContent = "👥 Members — "+Object.keys(users).length+" total";
+  chatbox.appendChild(title);
+
+  // Sort: online first, then by message count
+  const list = Object.entries(users)
+    .map(([uid,d]) => ({uid,...d, isOnline: !!online[uid]}))
+    .sort((a,b) => {
+      if (a.isOnline !== b.isOnline) return a.isOnline ? -1 : 1;
+      return (b.messageCount||0) - (a.messageCount||0);
+    });
+
+  list.forEach(u => {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:12px;padding:10px 16px;cursor:pointer;border-radius:8px;margin:2px 8px;";
+    row.style.transition = "background .15s";
+    row.onmouseenter = () => row.style.background = "var(--bg-lighter)";
+    row.onmouseleave = () => row.style.background = "";
+
+    const av = buildAvatar(u.avatarUrl||null, u.username, u.color||"#4da6ff", 34);
+    av.style.position = "relative"; av.style.flexShrink = "0";
+
+    const dot = document.createElement("div");
+    dot.style.cssText = `position:absolute;bottom:0;right:0;width:10px;height:10px;border-radius:50%;border:2px solid var(--bg-dark);background:${u.isOnline?"#23d160":"#555"};`;
+    av.appendChild(dot);
+
+    const info = document.createElement("div"); info.style.flex = "1";
+    const nameEl = document.createElement("div");
+    nameEl.style.cssText = "font-weight:700;font-size:14px;";
+    nameEl.textContent = u.username; nameEl.style.color = u.color||"#4da6ff";
+
+    const meta = document.createElement("div");
+    meta.style.cssText = "font-size:11px;color:var(--text-muted);margin-top:1px;";
+    const tags = [];
+    if (isOwner(u.uid)) tags.push("[Owner]");
+    else if (isMod(u.uid)) tags.push("[Mod]");
+    else if (isDev(u.uid)) tags.push("[Dev]");
+    tags.push((u.messageCount||0)+" msgs");
+    if (u.isOnline) tags.push("🟢 Online");
+    meta.textContent = tags.join(" · ");
+
+    info.appendChild(nameEl); info.appendChild(meta);
+    row.appendChild(av); row.appendChild(info);
+    row.addEventListener("click", () => openProfile(u.uid));
+    chatbox.appendChild(row);
+  });
+}
+
+// ============================================================
+// LOGS CHANNEL (mod only)
+// ============================================================
+async function renderLogsChannel() {
+  if (!canModerate()) {
+    $("chatbox").innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-dim);">🔒 Moderators only.</div>';
+    return;
+  }
+  const chatbox = $("chatbox");
+  chatbox.innerHTML = '<div style="padding:16px;color:var(--text-muted);font-size:12px;">Loading logs...</div>';
+
+  const snap = await db.ref("modLogs").orderByChild("timestamp").limitToLast(100).once("value");
+  const logs = snap.val() || {};
+  chatbox.innerHTML = "";
+
+  const title = document.createElement("div");
+  title.style.cssText = "padding:20px 16px 8px;font-size:18px;font-weight:800;color:var(--text-primary);";
+  title.textContent = "📋 Moderation Logs";
+  chatbox.appendChild(title);
+
+  const entries = Object.values(logs).sort((a,b) => b.timestamp - a.timestamp);
+  if (!entries.length) {
+    chatbox.innerHTML += '<div style="padding:20px;color:var(--text-dim);text-align:center;">No mod actions logged yet.</div>';
+    return;
+  }
+
+  const typeColors = { ban:"#ff4d4d", mute:"#fbbf24", delete:"#f472b6", auto_mute:"#fb923c" };
+  entries.forEach(log => {
+    const row = document.createElement("div");
+    row.style.cssText = "padding:10px 16px;border-bottom:1px solid var(--border);font-size:13px;";
+    const color = typeColors[log.type]||"#aaa";
+    const time = new Date(log.timestamp).toLocaleString();
+    let html = `<span style="color:${color};font-weight:800;">[${(log.type||"").toUpperCase()}]</span> `;
+    html += `<strong>${esc(log.action||"")}</strong>`;
+    if (log.targetUsername) html += ` → <span style="color:var(--accent);">${esc(log.targetUsername)}</span>`;
+    if (log.by) html += ` by <span style="font-weight:700;">${esc(log.by)}</span>`;
+    if (log.reason) html += ` — <em style="color:var(--text-muted);">${esc(log.reason)}</em>`;
+    if (log.message) html += `<div style="margin-top:4px;font-size:11px;color:var(--text-muted);font-style:italic;">"${esc(log.message.substring(0,120))}"</div>`;
+    html += `<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">${time}</div>`;
+    row.innerHTML = html;
+    chatbox.appendChild(row);
+  });
+}
+
+// ============================================================
+// REPORTS CHANNEL (mod only)
+// ============================================================
+async function renderReportsChannel() {
+  if (!canModerate()) {
+    $("chatbox").innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-dim);">🔒 Moderators only.</div>';
+    return;
+  }
+  const chatbox = $("chatbox");
+  chatbox.innerHTML = '<div style="padding:16px;color:var(--text-muted);font-size:12px;">Loading reports...</div>';
+
+  const snap = await db.ref("reports").orderByChild("timestamp").limitToLast(100).once("value");
+  const reports = snap.val() || {};
+  chatbox.innerHTML = "";
+
+  const title = document.createElement("div");
+  title.style.cssText = "padding:20px 16px 8px;font-size:18px;font-weight:800;color:var(--text-primary);";
+  title.textContent = "🚩 Reported Messages";
+  chatbox.appendChild(title);
+
+  const entries = Object.entries(reports).sort((a,b) => b[1].timestamp - a[1].timestamp);
+  if (!entries.length) {
+    chatbox.innerHTML += '<div style="padding:20px;color:var(--text-dim);text-align:center;">No reports yet.</div>';
+    return;
+  }
+
+  entries.forEach(([reportId, r]) => {
+    const card = document.createElement("div");
+    card.style.cssText = "margin:8px 12px;padding:14px 16px;border-radius:10px;background:var(--bg-lighter);border:1px solid var(--border);";
+
+    const time = new Date(r.timestamp).toLocaleString();
+    card.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;">
+        <div>
+          <span style="font-weight:800;color:#f472b6;">🚩 Report</span>
+          <span style="font-size:11px;color:var(--text-dim);margin-left:8px;">${time}</span>
+        </div>
+        <span style="font-size:11px;padding:2px 8px;border-radius:4px;background:var(--bg-input);color:var(--text-muted);">#${esc(r.channel||"")}</span>
+      </div>
+      <div style="margin-bottom:8px;padding:10px;border-radius:8px;background:var(--bg-input);border-left:3px solid var(--accent);">
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:3px;"><strong style="color:var(--accent);">${esc(r.messageAuthor||"?")}</strong> said:</div>
+        <div style="font-size:13px;color:var(--text-primary);">${esc((r.message||"[media]").substring(0,200))}</div>
+      </div>
+      <div style="font-size:12px;color:var(--text-muted);">
+        <strong>Reason:</strong> ${esc(r.reason||"")}
+        &nbsp;·&nbsp;<strong>Reported by:</strong> ${esc(r.reportedBy||"")}
+      </div>
+    `;
+
+    // Action buttons
+    const btns = document.createElement("div");
+    btns.style.cssText = "display:flex;gap:8px;margin-top:10px;";
+
+    const viewBtn = document.createElement("button"); viewBtn.className="confirm-btn ok";
+    viewBtn.style.cssText = "padding:5px 12px;font-size:12px;";
+    viewBtn.textContent = "👤 View User";
+    viewBtn.addEventListener("click", () => openProfile(r.messageAuthorUid));
+
+    const dismissBtn = document.createElement("button"); dismissBtn.className="confirm-btn cancel";
+    dismissBtn.style.cssText = "padding:5px 12px;font-size:12px;";
+    dismissBtn.textContent = "✓ Dismiss";
+    dismissBtn.addEventListener("click", async () => {
+      await db.ref("reports/"+reportId).remove();
+      card.remove();
+    });
+
+    btns.appendChild(viewBtn); btns.appendChild(dismissBtn);
+    card.appendChild(btns);
+    chatbox.appendChild(card);
+  });
+}
 function loadMessages(ch) {
   const baseRef = db.ref("messages/"+ch);
   baseRef.orderByChild("timestamp").limitToLast(PAGE_SIZE).once("value", snap => {
@@ -1659,9 +2202,40 @@ function renderMessage(data, ch, isNew, prepend) {
     delBtn.addEventListener("click", async e => {
       e.stopPropagation(); closeAllActionBars();
       const ok = await showConfirm("🗑️","Delete Message","This will delete the message for everyone.");
-      if (ok) db.ref("messages/"+ch+"/"+key).remove().catch(err => showToast("Delete failed: "+err.message,"err"));
+      if (ok) {
+        // Log deletion
+        db.ref("modLogs").push({
+          type:"delete", action:"Deleted message",
+          targetUid: userId, targetUsername: name,
+          by: myUsername, byUid: myUid,
+          message: message||"[image/media]",
+          at: Date.now(), timestamp: Date.now()
+        });
+        db.ref("messages/"+ch+"/"+key).remove().catch(err => showToast("Delete failed: "+err.message,"err"));
+      }
     });
     actionBar.appendChild(delBtn);
+  }
+
+  // Report button (visible to everyone except message owner)
+  if (!isMine) {
+    const reportBtn = document.createElement("button"); reportBtn.className="msg-action-btn report-btn";
+    reportBtn.textContent="🚩 Report";
+    reportBtn.addEventListener("click", async e => {
+      e.stopPropagation(); closeAllActionBars();
+      const reason = prompt("Why are you reporting this message?");
+      if (!reason || !reason.trim()) return;
+      await db.ref("reports").push({
+        reportedBy: myUsername, reportedByUid: myUid,
+        messageId: key, channel: ch,
+        messageAuthor: name, messageAuthorUid: userId,
+        message: message||"[image/media]",
+        reason: reason.trim(),
+        at: Date.now(), timestamp: Date.now()
+      });
+      showToast("🚩 Message reported. Moderators will review it.", "ok");
+    });
+    actionBar.appendChild(reportBtn);
   }
 
   bubble.appendChild(actionBar);
@@ -1700,14 +2274,14 @@ function renderMessage(data, ch, isNew, prepend) {
 // POLL RENDERING
 // ============================================================
 function renderPollMessage(data, ch, isNew, prepend) {
-  const { key, userId, name, color, time, pollQuestion, pollOptions, pollEndsAt } = data;
+  const { key, userId, name, color, time, pollQuestion, pollOptions, pollEndsAt, avatarUrl } = data;
   const nameColor = color || "#ffffff";
 
   const wrapper = document.createElement("div");
   wrapper.className = "msg-wrapper other poll-wrapper";
   wrapper.dataset.messageId = key;
 
-  const avEl = buildAvatar(null, name, nameColor, 34);
+  const avEl = buildAvatar(avatarUrl||null, name, nameColor, 34);
   avEl.className = "msg-avatar";
   avEl.style.cursor = "pointer";
   avEl.addEventListener("click", () => openProfile(userId));
@@ -1739,7 +2313,11 @@ function renderPollMessage(data, ch, isNew, prepend) {
   const optionsEl = document.createElement("div"); optionsEl.className="poll-options-display";
   pollEl.appendChild(optionsEl);
 
-  let hasVotedInThisPoll = false;
+  // track whether user has already voted in this poll (loaded from DB once)
+  let hasTrackedVoteForThisPoll = false;
+  db.ref("messages/"+ch+"/"+key+"/votes/"+myUid).once("value", s => {
+    if (s.exists()) hasTrackedVoteForThisPoll = true;
+  });
 
   function refreshPollDisplay(votesData) {
     optionsEl.innerHTML = "";
@@ -1761,9 +2339,9 @@ function renderPollMessage(data, ch, isNew, prepend) {
           db.ref("messages/"+ch+"/"+key+"/votes/"+myUid).remove();
         } else {
           db.ref("messages/"+ch+"/"+key+"/votes/"+myUid).set(i);
-          // Track poll vote stat (only first vote in this poll)
-          if (!hasVotedInThisPoll) {
-            hasVotedInThisPoll = true;
+          // Only count first-ever vote in this poll toward the stat
+          if (!hasTrackedVoteForThisPoll) {
+            hasTrackedVoteForThisPoll = true;
             db.ref("users/"+myUid+"/pollsVotedIn").transaction(c => (c||0)+1);
             checkAchievements();
           }
@@ -1776,9 +2354,6 @@ function renderPollMessage(data, ch, isNew, prepend) {
       row.appendChild(btn); row.appendChild(bar); row.appendChild(pctEl);
       optionsEl.appendChild(row);
     });
-
-    // track whether user has voted
-    if (votes[myUid] !== undefined) hasVotedInThisPoll = true;
   }
 
   bubble.appendChild(pollEl);
@@ -2018,8 +2593,13 @@ function openEmojiPicker(msgId, ch, anchor) {
 // CUSTOM REACTION TOGGLE
 // ============================================================
 function toggleCustomReaction(msgId, ch, reaction) {
-  // Use a sanitized key from the image URL
-  const key = "custom_"+btoa(reaction.url).replace(/[^a-zA-Z0-9]/g,"").substring(0,20);
+  // Generate a stable unique key from the reaction URL (unique per image)
+  let urlHash = 0;
+  for (let i = 0; i < reaction.url.length; i++) {
+    urlHash = ((urlHash << 5) - urlHash) + reaction.url.charCodeAt(i);
+    urlHash |= 0;
+  }
+  const key = "custom_" + Math.abs(urlHash).toString(36);
   const ref = db.ref("messages/"+ch+"/"+msgId+"/reactions/"+key+"/"+myUid);
   ref.once("value", async s => {
     if (s.exists()) {
@@ -2366,7 +2946,11 @@ function sendMessage() {
   const raw=$("msgInput").value.trim();
   if (!raw) return;
   if (raw.length>MAX_CHARS) return showToast("Message too long!","warn");
-  if (filterBadWords(raw)) return showToast("⚠️ Message contains disallowed words.","warn");
+  if (filterBadWords(raw)) {
+    showToast("⚠️ Message contains disallowed words. You have been muted for 30 minutes.","warn");
+    applySlurTimeout(raw);
+    return;
+  }
   if (raw===lastSentMsg) return showToast("⚠️ Can't send the same message twice in a row.","warn");
 
   sending=true;
@@ -2435,6 +3019,36 @@ function setupSettings() {
   cp.addEventListener("input", e=>{
     myColor=e.target.value; $("colorLabel").textContent=myColor;
     db.ref("users/"+myUid).update({color:myColor}); updateSidebarUser();
+  });
+
+  // Settings banner button
+  const sBannerBtn=$("settingsBannerBtn");
+  if (sBannerBtn) sBannerBtn.addEventListener("click", () => { $("bannerInput").click(); });
+
+  // Background image upload
+  const saveBgBtn=$("saveBgImageBtn");
+  const clearBgBtn=$("clearBgImageBtn");
+  const bgFileInput=$("bgImageFileInput");
+  if (saveBgBtn) saveBgBtn.addEventListener("click", ()=>{ if (bgFileInput) bgFileInput.click(); });
+  if (bgFileInput) bgFileInput.addEventListener("change", async ()=>{
+    const file=bgFileInput.files[0]; if (!file) return;
+    bgFileInput.value="";
+    if (file.size>5*1024*1024) return setMsg($("bgImageMsg"),"Image must be under 5MB.",false);
+    setMsg($("bgImageMsg"),"Uploading...",true);
+    const url=await uploadImgBB(file);
+    if (!url) return setMsg($("bgImageMsg"),"Upload failed.",false);
+    localStorage.setItem("snc_bg_image", url);
+    await db.ref("users/"+myUid).update({ bgImageUrl: url });
+    applyBackgroundImage(url);
+    setMsg($("bgImageMsg"),"✓ Background set!",true);
+    setTimeout(()=>setMsg($("bgImageMsg"),"",true),2000);
+  });
+  if (clearBgBtn) clearBgBtn.addEventListener("click", async ()=>{
+    localStorage.removeItem("snc_bg_image");
+    await db.ref("users/"+myUid+"/bgImageUrl").remove();
+    applyBackgroundImage(null);
+    setMsg($("bgImageMsg"),"✓ Background cleared.",true);
+    setTimeout(()=>setMsg($("bgImageMsg"),"",true),2000);
   });
 }
 
@@ -2603,6 +3217,30 @@ function applyTheme(name) {
 function loadTheme() {
   applyTheme(localStorage.getItem("snc_theme")||"Story Network");
   applyTextSize(localStorage.getItem("snc_textsize")||"14px");
+  applyBackgroundImage(localStorage.getItem("snc_bg_image")||null);
+}
+
+function applyBackgroundImage(url) {
+  const chatArea = $("chatArea");
+  if (!chatArea) return;
+  if (url) {
+    chatArea.style.backgroundImage = `url(${url})`;
+    chatArea.style.backgroundSize = "cover";
+    chatArea.style.backgroundPosition = "center";
+    chatArea.style.backgroundRepeat = "no-repeat";
+    chatArea.style.backgroundAttachment = "scroll";
+    // Make chatbox transparent so the background shows through
+    const chatbox = $("chatbox");
+    if (chatbox) chatbox.style.background = "transparent";
+  } else {
+    chatArea.style.backgroundImage = "";
+    chatArea.style.backgroundSize = "";
+    chatArea.style.backgroundPosition = "";
+    chatArea.style.backgroundRepeat = "";
+    chatArea.style.backgroundAttachment = "";
+    const chatbox = $("chatbox");
+    if (chatbox) chatbox.style.background = "";
+  }
 }
 
 function buildSizeRow() {
@@ -2620,6 +3258,46 @@ function buildSizeRow() {
   });
 }
 function applyTextSize(size){ $("chatbox").style.fontSize=size; }
+
+// ============================================================
+// ============================================================
+// OPEN IN ABOUT:BLANK
+// ============================================================
+function openInBlank() {
+  const w = window.open("about:blank", "_blank");
+  if (!w) return showToast("Popup blocked — allow popups for this site.", "warn");
+  const html = document.documentElement.outerHTML;
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      w.localStorage.setItem(k, localStorage.getItem(k));
+    }
+  } catch(e) {}
+}
+
+// ============================================================
+// MOBILE SIDEBAR
+// ============================================================
+function openMobileSidebar() {
+  const overlay = $("sidebarOverlay");
+  if (sidebar) sidebar.classList.add("mobile-open");
+  if (overlay) overlay.style.display = "block";
+}
+function closeMobileSidebar() {
+  const sidebar = $("sidebar");
+  const overlay = $("sidebarOverlay");
+  if (sidebar) sidebar.classList.remove("mobile-open");
+  if (overlay) overlay.style.display = "none";
+}
+// Close mobile sidebar when a channel is selected
+document.addEventListener("click", e => {
+  if (e.target.closest(".channel-btn") && window.innerWidth <= 768) {
+    closeMobileSidebar();
+  }
+});
 
 // ============================================================
 // CONFIRM DIALOG
