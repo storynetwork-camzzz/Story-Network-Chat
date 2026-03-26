@@ -21,7 +21,7 @@ const IMGBB_KEY  = "7ae7b64cb4da961ab6a7d18d920099a8";
 const MAX_CHARS  = 250;
 const PAGE_SIZE  = 50;
 const WEEK_MS    = 7 * 24 * 60 * 60 * 1000;
-const BUILTIN_CHANNELS = ["general","offtopic","announcements","modchat","leaderboard","myleaderboard","rules","achievements","members","logs","reports"];
+const BUILTIN_CHANNELS = ["general","offtopic","announcements","modchat","leaderboard","myleaderboard","rules","members","logs","reports"];
 function getAllChannels() {
   return [...BUILTIN_CHANNELS, ...Object.keys(customChannels)];
 }
@@ -234,6 +234,24 @@ async function applySlurTimeout(message) {
     message: message,
     at: Date.now(),
     timestamp: Date.now()
+  });
+}
+
+async function autoModBan(targetUid, targetUsername, reason) {
+  const banData = { reason: reason || "AutoMod ban", by: "AutoMod", byUid: "system", at: Date.now() };
+  await db.ref("config/banned/"+targetUid).set(banData);
+  // Device ban all known devices
+  const devSnap = await db.ref("users/"+targetUid+"/devices").once("value");
+  if (devSnap.exists()) {
+    const updates = {};
+    Object.keys(devSnap.val()).forEach(fp => {
+      updates["config/deviceBans/"+fp] = { uid: targetUid, reason: banData.reason, at: banData.at };
+    });
+    await db.ref().update(updates);
+  }
+  await db.ref("modLogs").push({
+    type:"auto_ban", action:"Auto-banned user", targetUid, targetUsername,
+    by: "AutoMod", byUid: "system", reason: banData.reason, at: Date.now(), timestamp: Date.now()
   });
 }
 
@@ -660,6 +678,11 @@ function setupApp() {
   if (friendsBtn) friendsBtn.addEventListener("click", openFriendsModal);
   setupFriendsModal();
 
+  // DM button
+  const dmBtn = $("dmBtn");
+  if (dmBtn) dmBtn.addEventListener("click", openDMOverlay);
+  setupDMSystem();
+
   $("chatbox").addEventListener("scroll", function() {
     const dist = this.scrollHeight - this.scrollTop - this.clientHeight;
     userScrolledUp = dist > 120;
@@ -744,7 +767,9 @@ async function banUser(targetUid, targetUsername) {
   if (!ok) return;
   const banData = { reason: reason || "No reason given.", by: myUsername, byUid: myUid, at: Date.now() };
   await db.ref("config/banned/"+targetUid).set(banData);
-  // Also device-ban all known fingerprints for this user
+  // Clear any existing automod or manual mute so ban takes effect cleanly
+  await db.ref("config/muted/"+targetUid).remove();
+  // Device-ban all known fingerprints for this user
   const devSnap = await db.ref("users/"+targetUid+"/devices").once("value");
   if (devSnap.exists()) {
     const updates = {};
@@ -991,6 +1016,9 @@ async function renderFriendsModalTab(tab) {
       const profileBtn = document.createElement("button"); profileBtn.className = "confirm-btn ok fm-btn";
       profileBtn.textContent = "Profile";
       profileBtn.addEventListener("click", () => { $("friendsModal").style.display="none"; openProfile(uid); });
+      const dmFriendBtn = document.createElement("button"); dmFriendBtn.className = "confirm-btn ok fm-btn";
+      dmFriendBtn.textContent = "💬 DM";
+      dmFriendBtn.addEventListener("click", () => { $("friendsModal").style.display="none"; openDMWith(uid); });
       const removeBtn = document.createElement("button"); removeBtn.className = "confirm-btn cancel fm-btn";
       removeBtn.textContent = "Remove";
       removeBtn.addEventListener("click", async () => {
@@ -1001,7 +1029,7 @@ async function renderFriendsModalTab(tab) {
         showToast("Friend removed.","ok");
         renderFriendsModalTab("friends");
       });
-      btns.appendChild(profileBtn); btns.appendChild(removeBtn);
+      btns.appendChild(profileBtn); btns.appendChild(dmFriendBtn); btns.appendChild(removeBtn);
       row.appendChild(av); row.appendChild(info); row.appendChild(btns);
       body.appendChild(row);
     });
@@ -1133,7 +1161,16 @@ async function openProfile(targetUid) {
   const avWrap = $("profileAvatar");
   avWrap.innerHTML = "";
   const avEl = buildAvatar(userData.avatarUrl||null, username, color, 72);
-  avEl.style.cssText = `width:72px;height:72px;border-radius:50%;border:4px solid var(--bg-dark);display:block;`;
+  // Add border without clobbering the element's existing styles
+  avEl.style.border = "4px solid var(--bg-dark)";
+  avEl.style.flexShrink = "0";
+  avEl.style.width = "72px";
+  avEl.style.height = "72px";
+  avEl.style.borderRadius = "50%";
+  if (avEl.tagName === "IMG") {
+    avEl.style.objectFit = "cover";
+    avEl.style.display = "block";
+  }
   avWrap.appendChild(avEl);
 
   // Name
@@ -1158,7 +1195,15 @@ async function openProfile(targetUid) {
 
   // Bio
   const bioEl = $("profileBio");
-  if (bioEl) bioEl.textContent = userData.bio || "";
+  if (bioEl) {
+    if (userData.bio) {
+      bioEl.textContent = userData.bio;
+      bioEl.style.display = "";
+    } else {
+      bioEl.textContent = "";
+      bioEl.style.display = "none";
+    }
+  }
 
   // Stats
   $("profileMsgCount").textContent = userData.messageCount || 0;
@@ -1209,6 +1254,10 @@ async function openProfile(targetUid) {
       const friendedBtn = document.createElement("button"); friendedBtn.className="profile-action-btn friend-btn"; friendedBtn.disabled=true;
       friendedBtn.textContent = "✅ Friends";
       actionsEl.appendChild(friendedBtn);
+      const dmProfileBtn = document.createElement("button"); dmProfileBtn.className="profile-action-btn friend-btn";
+      dmProfileBtn.textContent = "💬 Send DM";
+      dmProfileBtn.addEventListener("click", () => { $("profileModal").style.display="none"; openDMWith(targetUid); });
+      actionsEl.appendChild(dmProfileBtn);
     }
 
     if (canModerate() && !isOwner(targetUid)) {
@@ -1235,6 +1284,12 @@ async function openProfile(targetUid) {
         unmuteBtn.textContent = "🔊 Unmute";
         unmuteBtn.addEventListener("click", async () => {
           await db.ref("config/muted/"+targetUid).remove();
+          await db.ref("modLogs").push({
+            type:"unmute", action:"Unmuted user",
+            targetUid, targetUsername: username,
+            by: myUsername, byUid: myUid,
+            at: Date.now(), timestamp: Date.now()
+          });
           showToast("🔊 "+username+" has been unmuted","ok");
           $("profileModal").style.display = "none";
         });
@@ -1259,6 +1314,22 @@ async function openProfile(targetUid) {
           const ok = await showConfirm("✅","Unban "+username,"This will restore their access to the chat.");
           if (!ok) return;
           await db.ref("config/banned/"+targetUid).remove();
+          // Also remove all device bans for this user
+          const devSnap = await db.ref("users/"+targetUid+"/devices").once("value");
+          if (devSnap.exists()) {
+            const updates = {};
+            Object.keys(devSnap.val()).forEach(fp => {
+              updates["config/deviceBans/"+fp] = null;
+            });
+            await db.ref().update(updates);
+          }
+          // Log unban to mod logs
+          await db.ref("modLogs").push({
+            type:"unban", action:"Unbanned user",
+            targetUid, targetUsername: username,
+            by: myUsername, byUid: myUid,
+            at: Date.now(), timestamp: Date.now()
+          });
           showToast("✅ "+username+" has been unbanned","ok");
           $("profileModal").style.display = "none";
         });
@@ -1533,7 +1604,7 @@ function switchChannel(ch) {
     general:"general", offtopic:"off-topic",
     announcements:"announcements", modchat:"mod-chat",
     leaderboard:"leaderboard", myleaderboard:"my leaderboard",
-    rules:"rules", achievements:"achievements", members:"members",
+    rules:"rules", members:"members",
     logs:"mod-logs", reports:"reports"
   };
   const chLabel = builtinLabels[ch] || (customChannels[ch] ? customChannels[ch].name : ch);
@@ -1545,7 +1616,7 @@ function switchChannel(ch) {
   const isRules = ch === "rules";
   const isModChat = ch === "modchat";
   const isLeaderboard = ch === "leaderboard" || ch === "myleaderboard";
-  const isSpecialReadOnly = ch === "achievements" || ch === "members" || ch === "logs" || ch === "reports";
+  const isSpecialReadOnly = ch === "members" || ch === "logs" || ch === "reports";
 
   $("inputRow").style.display = "flex";
   $("formatToolbar").style.display = "flex";
@@ -1583,7 +1654,9 @@ function switchChannel(ch) {
   }
 
   const oldNotice = $("announcementsNotice");
-  if (!isAnnouncements && !isRules && oldNotice) oldNotice.style.display = "none";
+  if (!isAnnouncements && oldNotice) oldNotice.style.display = "none";
+  const oldRulesNotice = $("rulesNotice");
+  if (!isRules && oldRulesNotice) oldRulesNotice.style.display = "none";
   if (isAnnouncements) updateAnnouncementsUI();
   if (isRules) updateRulesUI();
 
@@ -1595,8 +1668,6 @@ function switchChannel(ch) {
   } else if (ch === "myleaderboard") {
     renderLeaderboard(true);
     leaderboardTimer = setInterval(() => renderLeaderboard(true), 5 * 60 * 1000);
-  } else if (ch === "achievements") {
-    renderAchievementsChannel();
   } else if (ch === "members") {
     renderMembersChannel();
   } else if (ch === "logs") {
@@ -1861,7 +1932,7 @@ async function renderLogsChannel() {
     return;
   }
 
-  const typeColors = { ban:"#ff4d4d", mute:"#fbbf24", delete:"#f472b6", auto_mute:"#fb923c" };
+  const typeColors = { ban:"#ff4d4d", unban:"#57f287", mute:"#fbbf24", unmute:"#67e8f9", delete:"#f472b6", auto_mute:"#fb923c", auto_ban:"#ff4d4d" };
   entries.forEach(log => {
     const row = document.createElement("div");
     row.style.cssText = "padding:10px 16px;border-bottom:1px solid var(--border);font-size:13px;";
@@ -3260,8 +3331,632 @@ function buildSizeRow() {
 function applyTextSize(size){ $("chatbox").style.fontSize=size; }
 
 // ============================================================
+// DM SYSTEM
 // ============================================================
-// OPEN IN ABOUT:BLANK
+let currentDMConvId = null;
+let dmListeners = {};
+let dmUnreadCounts = {};
+let dmConvListener = null; // live listener for conv list
+let dmRenderedIds = {}; // track rendered message IDs per conv to prevent duplicates
+let dmRenderListTimer = null; // debounce re-renders of conv list
+
+function getDMConvId(uid1, uid2) {
+  return [uid1, uid2].sort().join("_dm_");
+}
+
+function setupDMSystem() {
+  $("dmClose").addEventListener("click", () => { $("dmOverlay").style.display = "none"; currentDMConvId = null; });
+  $("dmOverlay").addEventListener("click", e => { if (e.target === $("dmOverlay")) { $("dmOverlay").style.display = "none"; currentDMConvId = null; } });
+  $("dmSendBtn").addEventListener("click", sendDMMessage);
+  $("dmInput").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendDMMessage(); } });
+  $("dmInput").addEventListener("input", () => {
+    $("dmInput").style.height = "auto";
+    $("dmInput").style.height = Math.min($("dmInput").scrollHeight, 120) + "px";
+  });
+  $("newGroupBtn").addEventListener("click", openNewGroupModal);
+  $("newGroupCancel").addEventListener("click", () => $("newGroupModal").style.display = "none");
+  $("newGroupCreate").addEventListener("click", createGroupChat);
+
+  // GC settings button
+  $("gcSettingsBtn").addEventListener("click", openGCSettings);
+  $("gcSettingsClose").addEventListener("click", () => $("gcSettingsModal").style.display = "none");
+  $("gcSettingsModal").addEventListener("click", e => { if (e.target === $("gcSettingsModal")) $("gcSettingsModal").style.display = "none"; });
+  $("gcRenameBtn").addEventListener("click", renameGC);
+  $("gcPhotoBtn").addEventListener("click", () => $("gcPhotoInput").click());
+  $("gcPhotoInput").addEventListener("change", uploadGCPhoto);
+  $("gcAddMembersBtn").addEventListener("click", addGCMembers);
+  $("gcLeaveBtn").addEventListener("click", leaveGC);
+
+  // Live listener for unread badges — fires whenever any conv changes
+  db.ref("dmConversations").on("value", snap => {
+    if (!snap.exists()) return;
+    let totalUnread = 0;
+    snap.forEach(convSnap => {
+      const conv = convSnap.val();
+      if (!conv || !conv.members || !conv.members[myUid]) return;
+      const lastRead = conv.members[myUid].lastRead || 0;
+      const lastMsg = conv.lastMessageAt || 0;
+      if (lastMsg > lastRead) totalUnread++;
+    });
+    const badge = $("dmUnreadBadge");
+    if (badge) {
+      badge.style.display = totalUnread > 0 ? "inline-flex" : "none";
+      badge.textContent = totalUnread;
+    }
+    // Debounce conv list re-render so rapid message sends don't cause flicker
+    if ($("dmOverlay").style.display !== "none") {
+      clearTimeout(dmRenderListTimer);
+      dmRenderListTimer = setTimeout(renderDMConvList, 400);
+    }
+  });
+}
+
+function openDMOverlay() {
+  $("dmOverlay").style.display = "flex";
+  renderDMConvList();
+}
+
+function openDMWith(friendUid) {
+  $("dmOverlay").style.display = "flex";
+  const convId = getDMConvId(myUid, friendUid);
+  db.ref("dmConversations/"+convId).once("value", snap => {
+    if (!snap.exists()) {
+      const friendData = allUsersCache[friendUid] || {};
+      db.ref("dmConversations/"+convId).set({
+        type: "dm",
+        members: {
+          [myUid]: { username: myUsername, color: myColor, avatarUrl: myAvatar||null, lastRead: 0 },
+          [friendUid]: { username: friendData.username||"User", color: friendData.color||"#4da6ff", avatarUrl: friendData.avatarUrl||null, lastRead: 0 }
+        },
+        createdAt: Date.now(),
+        lastMessageAt: 0
+      });
+    }
+    renderDMConvList();
+    openDMConversation(convId);
+  });
+}
+
+async function renderDMConvList() {
+  const list = $("dmConvList");
+
+  const snap = await db.ref("dmConversations").once("value");
+  list.innerHTML = "";
+  if (!snap.exists()) {
+    list.innerHTML = '<div style="padding:16px;font-size:12px;color:var(--text-dim);">No conversations yet.<br>Add friends and send them a DM!</div>';
+    return;
+  }
+
+  const dms = [], groups = [];
+  snap.forEach(child => {
+    const conv = child.val();
+    if (conv && conv.members && conv.members[myUid]) {
+      const obj = { id: child.key, ...conv };
+      if (conv.type === "group") groups.push(obj);
+      else dms.push(obj);
+    }
+  });
+
+  dms.sort((a, b) => (b.lastMessageAt||0) - (a.lastMessageAt||0));
+  groups.sort((a, b) => (b.lastMessageAt||0) - (a.lastMessageAt||0));
+
+  if (!dms.length && !groups.length) {
+    list.innerHTML = '<div style="padding:16px;font-size:12px;color:var(--text-dim);">No conversations yet.</div>';
+    return;
+  }
+
+  function makeConvRow(conv) {
+    const isGroup = conv.type === "group";
+    let displayName, avatarEl;
+    if (isGroup) {
+      displayName = conv.groupName || "Group Chat";
+      if (conv.groupAvatarUrl) {
+        const img = document.createElement("img");
+        img.src = conv.groupAvatarUrl;
+        img.style.cssText = "width:34px;height:34px;border-radius:50%;object-fit:cover;flex-shrink:0;";
+        avatarEl = img;
+      } else {
+        avatarEl = buildInitialAvatar("G", "#5865f2", 34);
+      }
+    } else {
+      const otherUid = Object.keys(conv.members).find(uid => uid !== myUid);
+      const otherUser = allUsersCache[otherUid] || conv.members[otherUid] || {};
+      displayName = otherUser.username || "Unknown";
+      avatarEl = buildAvatar(otherUser.avatarUrl||null, displayName, otherUser.color||"#4da6ff", 34);
+    }
+
+    const lastRead = (conv.members[myUid]||{}).lastRead || 0;
+    const hasUnread = (conv.lastMessageAt||0) > lastRead;
+
+    const row = document.createElement("div");
+    row.className = "dm-conv-row" + (currentDMConvId === conv.id ? " selected" : "") + (hasUnread ? " unread" : "");
+    const nameEl = document.createElement("span"); nameEl.className = "dm-conv-name";
+    nameEl.textContent = displayName;
+    if (!isGroup) {
+      const otherUid = Object.keys(conv.members).find(uid => uid !== myUid);
+      const otherUser = allUsersCache[otherUid] || conv.members[otherUid] || {};
+      nameEl.style.color = otherUser.color || "var(--text-primary)";
+    }
+    const previewEl = document.createElement("span"); previewEl.className = "dm-conv-preview";
+    previewEl.textContent = conv.lastMessage ? conv.lastMessage.substring(0, 40) : "No messages yet";
+    const info = document.createElement("div"); info.style.cssText = "flex:1;overflow:hidden;";
+    info.appendChild(nameEl); info.appendChild(previewEl);
+    row.appendChild(avatarEl); row.appendChild(info);
+    if (hasUnread) {
+      const dot = document.createElement("div");
+      dot.style.cssText = "width:8px;height:8px;border-radius:50%;background:var(--accent);flex-shrink:0;";
+      row.appendChild(dot);
+    }
+    row.addEventListener("click", () => openDMConversation(conv.id));
+    return row;
+  }
+
+  // Direct Messages section
+  if (dms.length) {
+    const dmLabel = document.createElement("div");
+    dmLabel.style.cssText = "font-size:10px;font-weight:800;color:var(--text-dim);letter-spacing:.08em;text-transform:uppercase;padding:10px 12px 4px;";
+    dmLabel.textContent = "Direct Messages";
+    list.appendChild(dmLabel);
+    dms.forEach(conv => list.appendChild(makeConvRow(conv)));
+  }
+
+  // Group Chats section — separated with a divider
+  if (groups.length) {
+    const sep = document.createElement("div");
+    sep.style.cssText = "height:1px;background:var(--border);margin:8px 10px;";
+    list.appendChild(sep);
+    const gcLabel = document.createElement("div");
+    gcLabel.style.cssText = "font-size:10px;font-weight:800;color:var(--text-dim);letter-spacing:.08em;text-transform:uppercase;padding:4px 12px 4px;";
+    gcLabel.textContent = "Group Chats";
+    list.appendChild(gcLabel);
+    groups.forEach(conv => list.appendChild(makeConvRow(conv)));
+  }
+}
+
+function openDMConversation(convId) {
+  // Tear down previous listener
+  if (dmListeners[currentDMConvId]) {
+    try { dmListeners[currentDMConvId].ref.off("child_added", dmListeners[currentDMConvId].fn); } catch(e){}
+    delete dmListeners[currentDMConvId];
+  }
+
+  currentDMConvId = convId;
+  dmRenderedIds[convId] = {};
+
+  db.ref("dmConversations/"+convId+"/members/"+myUid+"/lastRead").set(Date.now());
+  document.querySelectorAll(".dm-conv-row").forEach(r => r.classList.remove("selected"));
+
+  db.ref("dmConversations/"+convId).once("value", snap => {
+    if (!snap.exists()) return;
+    const conv = snap.val();
+    const isGroup = conv.type === "group";
+
+    const titleEl = $("dmChatTitle");
+    const membersEl = $("dmChatMembers");
+    if (isGroup) {
+      titleEl.textContent = conv.groupName || "Group Chat";
+      titleEl.style.color = "";
+      const memberNames = Object.values(conv.members).map(m => m.username).join(", ");
+      membersEl.textContent = memberNames;
+      $("gcSettingsBtn").style.display = "block";
+    } else {
+      const otherUid = Object.keys(conv.members).find(uid => uid !== myUid);
+      const otherUser = allUsersCache[otherUid] || conv.members[otherUid] || {};
+      titleEl.textContent = otherUser.username || "Unknown";
+      titleEl.style.color = otherUser.color || "var(--text-primary)";
+      membersEl.textContent = "";
+      $("gcSettingsBtn").style.display = "none";
+    }
+
+    $("dmInputRow").style.display = "flex";
+    $("dmChatbox").innerHTML = "";
+    $("dmInput").focus();
+
+    const msgRef = db.ref("dmMessages/"+convId);
+
+    // Load history first, then attach live listener — no overlap, no duplicates
+    msgRef.orderByChild("timestamp").limitToLast(60).once("value", msgSnap => {
+      const msgs = [];
+      msgSnap.forEach(child => {
+        msgs.push({ id: child.key, ...child.val() });
+        dmRenderedIds[convId][child.key] = true;
+      });
+      msgs.sort((a,b) => a.timestamp - b.timestamp);
+      msgs.forEach(m => renderDMMessage(m, convId, false));
+      setTimeout(() => { $("dmChatbox").scrollTop = $("dmChatbox").scrollHeight; }, 50);
+
+      // Live listener: child_added fires for ALL existing + new children,
+      // so we use the rendered ID set to skip already-shown messages
+      const fn = msgRef.orderByChild("timestamp").on("child_added", child => {
+        const id = child.key;
+        if (dmRenderedIds[convId] && dmRenderedIds[convId][id]) return; // already rendered
+        if (!dmRenderedIds[convId]) return;
+        dmRenderedIds[convId][id] = true;
+        renderDMMessage({ id, ...child.val() }, convId, true);
+        db.ref("dmConversations/"+convId+"/members/"+myUid+"/lastRead").set(Date.now());
+      });
+      dmListeners[convId] = { ref: msgRef.orderByChild("timestamp"), fn };
+    });
+  });
+}
+
+function renderDMMessage(data, convId, isNew) {
+  const chatbox = $("dmChatbox");
+
+  // System messages (join/leave/remove notices)
+  if (data.system || data.userId === "system") {
+    const wrapper = document.createElement("div");
+    wrapper.className = "dm-msg-wrapper system";
+    const bubble = document.createElement("div");
+    bubble.className = "dm-bubble";
+    bubble.style.cssText = "background:transparent;border:none;font-size:11px;color:var(--text-dim);font-style:italic;text-align:center;padding:3px 12px;";
+    bubble.textContent = data.message || "";
+    wrapper.appendChild(bubble);
+    chatbox.appendChild(wrapper);
+    if (isNew) chatbox.scrollTop = chatbox.scrollHeight;
+    return;
+  }
+
+  const isMine = data.userId === myUid;
+  const wrapper = document.createElement("div");
+  wrapper.className = "dm-msg-wrapper " + (isMine ? "mine" : "other");
+
+  const avEl = buildAvatar(data.avatarUrl||null, data.name||"?", data.color||"#4da6ff", 30);
+  avEl.style.cssText = "width:30px;height:30px;border-radius:50%;flex-shrink:0;cursor:pointer;overflow:hidden;";
+  avEl.addEventListener("click", () => { if (data.userId) openProfile(data.userId); });
+
+  const bubble = document.createElement("div"); bubble.className = "dm-bubble " + (isMine ? "mine" : "other");
+
+  if (!isMine) {
+    const nameEl = document.createElement("div"); nameEl.className = "dm-msg-name";
+    nameEl.textContent = data.name || "Unknown"; nameEl.style.color = data.color || "var(--accent)";
+    bubble.appendChild(nameEl);
+  }
+
+  const textEl = document.createElement("div"); textEl.className = "dm-msg-text";
+  textEl.innerHTML = parseMessage(data.message || "");
+  bubble.appendChild(textEl);
+
+  const footer = document.createElement("div"); footer.className = "dm-msg-footer";
+  footer.textContent = data.time || "";
+
+  if (!isMine) {
+    const reportBtn = document.createElement("button"); reportBtn.className = "dm-report-btn";
+    reportBtn.textContent = "🚩";
+    reportBtn.title = "Report message";
+    reportBtn.addEventListener("click", async e => {
+      e.stopPropagation();
+      const reason = prompt("Why are you reporting this message?");
+      if (!reason || !reason.trim()) return;
+      await db.ref("reports").push({
+        reportedBy: myUsername, reportedByUid: myUid,
+        messageId: data.id, channel: "DM:"+convId,
+        messageAuthor: data.name, messageAuthorUid: data.userId,
+        message: data.message || "[media]",
+        reason: reason.trim(),
+        at: Date.now(), timestamp: Date.now()
+      });
+      showToast("🚩 Message reported to moderators.", "ok");
+    });
+    footer.appendChild(reportBtn);
+  }
+
+  bubble.appendChild(footer);
+  wrapper.appendChild(avEl);
+  wrapper.appendChild(bubble);
+  chatbox.appendChild(wrapper);
+
+  if (isNew) chatbox.scrollTop = chatbox.scrollHeight;
+}
+
+async function sendDMMessage() {
+  if (!currentDMConvId) return;
+  const input = $("dmInput");
+  const raw = input.value.trim();
+  if (!raw) return;
+  if (raw.length > 500) return showToast("Message too long!","warn");
+
+  if (filterBadWords(raw)) {
+    showToast("⚠️ Message contains disallowed words.", "warn");
+    applySlurTimeout(raw);
+    return;
+  }
+
+  const convSnap = await db.ref("dmConversations/"+currentDMConvId).once("value");
+  if (!convSnap.exists()) return;
+  const conv = convSnap.val();
+  if (!conv.members || !conv.members[myUid]) return showToast("You are not in this conversation.","err");
+
+  // Only require friendship for 1-on-1 DMs, not group chats
+  if (conv.type === "dm") {
+    const otherUid = Object.keys(conv.members).find(uid => uid !== myUid);
+    if (!myFriends[otherUid]) return showToast("You must be friends to send DMs.","warn");
+  }
+
+  input.value = ""; input.style.height = "auto";
+  const now = Date.now();
+  const msgData = {
+    name: myUsername, message: raw,
+    time: new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),
+    timestamp: now, color: myColor, userId: myUid, avatarUrl: myAvatar||null
+  };
+  await db.ref("dmMessages/"+currentDMConvId).push(msgData);
+  await db.ref("dmConversations/"+currentDMConvId).update({
+    lastMessage: raw.substring(0, 60),
+    lastMessageAt: now
+  });
+  await db.ref("dmConversations/"+currentDMConvId+"/members/"+myUid+"/lastRead").set(now);
+}
+
+function openNewGroupModal() {
+  $("newGroupModal").style.display = "flex";
+  const list = $("groupMemberList");
+  list.innerHTML = "";
+  // Show ALL users except yourself
+  const users = Object.entries(allUsersCache).filter(([uid]) => uid !== myUid);
+  if (!users.length) {
+    list.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:8px;">No other users found.</div>';
+    return;
+  }
+  users.sort(([,a],[,b]) => (a.username||"").localeCompare(b.username||""));
+  users.forEach(([uid, u]) => {
+    const isFriend = !!myFriends[uid];
+    const row = document.createElement("label");
+    row.style.cssText = "display:flex;align-items:center;gap:10px;padding:8px 4px;cursor:pointer;border-radius:8px;";
+    row.onmouseenter = () => row.style.background = "var(--bg-lighter)";
+    row.onmouseleave = () => row.style.background = "";
+    const cb = document.createElement("input"); cb.type = "checkbox"; cb.value = uid;
+    cb.style.cssText = "width:16px;height:16px;accent-color:var(--accent);flex-shrink:0;";
+    const av = buildAvatar(u.avatarUrl||null, u.username||"?", u.color||"#4da6ff", 28);
+    const nameEl = document.createElement("span");
+    nameEl.textContent = (u.username||"Unknown") + (isFriend ? " 🤝" : "");
+    nameEl.style.color = u.color||"var(--text-primary)"; nameEl.style.fontWeight = "700"; nameEl.style.fontSize = "13px";
+    row.appendChild(cb); row.appendChild(av); row.appendChild(nameEl);
+    list.appendChild(row);
+  });
+}
+
+async function createGroupChat() {
+  const checked = [...$("groupMemberList").querySelectorAll("input[type=checkbox]:checked")];
+  if (!checked.length) return showToast("Select at least one friend.","warn");
+  const memberUids = checked.map(cb => cb.value);
+  if (memberUids.length + 1 > 13) return showToast("Max 13 members in a group.","warn");
+
+  const groupName = $("groupNameInput").value.trim() || "Group Chat";
+  const members = { [myUid]: { username: myUsername, color: myColor, avatarUrl: myAvatar||null, lastRead: 0 } };
+
+  // Add all selected members regardless of whether they know each other
+  for (const uid of memberUids) {
+    const u = allUsersCache[uid] || {};
+    members[uid] = { username: u.username||"User", color: u.color||"#4da6ff", avatarUrl: u.avatarUrl||null, lastRead: 0 };
+  }
+
+  const convRef = db.ref("dmConversations").push();
+  await convRef.set({
+    type: "group",
+    groupName,
+    members,
+    createdAt: Date.now(),
+    lastMessageAt: Date.now(), // set now so it shows at top and triggers live listeners
+    createdBy: myUid
+  });
+
+  $("newGroupModal").style.display = "none";
+  $("groupNameInput").value = "";
+  showToast("✅ Group chat created!","ok");
+  renderDMConvList();
+  openDMConversation(convRef.key);
+}
+
+// ============================================================
+// GROUP CHAT SETTINGS
+// ============================================================
+async function openGCSettings() {
+  if (!currentDMConvId) return;
+  const snap = await db.ref("dmConversations/"+currentDMConvId).once("value");
+  if (!snap.exists()) return;
+  const conv = snap.val();
+  if (conv.type !== "group") return;
+
+  // Populate current name
+  $("gcRenameInput").value = conv.groupName || "";
+
+  // Avatar preview
+  const prevEl = $("gcAvatarPreview");
+  prevEl.innerHTML = "";
+  if (conv.groupAvatarUrl) {
+    const img = document.createElement("img");
+    img.src = conv.groupAvatarUrl;
+    img.style.cssText = "width:100%;height:100%;object-fit:cover;";
+    prevEl.appendChild(img);
+  } else {
+    prevEl.textContent = "👥";
+  }
+
+  // Add members: show ALL users not already in the group
+  const gcAddList = $("gcAddMemberList");
+  gcAddList.innerHTML = "";
+  const currentMemberUids = Object.keys(conv.members || {});
+  const usersToAdd = Object.entries(allUsersCache)
+    .filter(([uid]) => uid !== myUid && !currentMemberUids.includes(uid))
+    .sort(([,a],[,b]) => (a.username||"").localeCompare(b.username||""));
+  if (!usersToAdd.length) {
+    gcAddList.innerHTML = '<div style="font-size:11px;color:var(--text-dim);padding:8px;">Everyone is already in this group.</div>';
+  } else {
+    usersToAdd.forEach(([uid, u]) => {
+      const isFriend = !!myFriends[uid];
+      const row = document.createElement("label");
+      row.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px 4px;cursor:pointer;border-radius:6px;";
+      row.onmouseenter = () => row.style.background = "var(--bg-lighter)";
+      row.onmouseleave = () => row.style.background = "";
+      const cb = document.createElement("input"); cb.type = "checkbox"; cb.value = uid;
+      cb.style.cssText = "width:15px;height:15px;accent-color:var(--accent);flex-shrink:0;";
+      const av = buildAvatar(u.avatarUrl||null, u.username||"?", u.color||"#4da6ff", 24);
+      const nameEl = document.createElement("span");
+      nameEl.textContent = (u.username||"Unknown") + (isFriend ? " 🤝" : "");
+      nameEl.style.cssText = "font-size:12px;font-weight:700;color:"+(u.color||"var(--text-primary)")+";";
+      row.appendChild(cb); row.appendChild(av); row.appendChild(nameEl);
+      gcAddList.appendChild(row);
+    });
+  }
+
+  // Members list
+  const membersList = $("gcMembersList");
+  membersList.innerHTML = "";
+  const isCreator = conv.createdBy === myUid;
+  for (const [uid, member] of Object.entries(conv.members || {})) {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:8px;padding:7px 6px;border-radius:6px;";
+    const av = buildAvatar(member.avatarUrl||null, member.username||"?", member.color||"#4da6ff", 28);
+    const nameEl = document.createElement("span");
+    nameEl.textContent = member.username || "Unknown";
+    nameEl.style.cssText = "flex:1;font-size:13px;font-weight:700;color:"+(member.color||"var(--text-primary)")+";";
+    row.appendChild(av); row.appendChild(nameEl);
+
+    if (uid === conv.createdBy) {
+      const badge = document.createElement("span");
+      badge.textContent = "Owner";
+      badge.style.cssText = "font-size:9px;font-weight:800;color:var(--accent);background:var(--accent-light);padding:2px 6px;border-radius:4px;";
+      row.appendChild(badge);
+    } else if (isCreator && uid !== myUid) {
+      const removeBtn = document.createElement("button");
+      removeBtn.textContent = "Remove";
+      removeBtn.style.cssText = "background:rgba(255,77,77,.12);border:1px solid rgba(255,77,77,.3);border-radius:6px;padding:3px 8px;font-size:10px;font-weight:700;color:#ff4d4d;cursor:pointer;font-family:var(--font);transition:all .15s;";
+      removeBtn.addEventListener("click", async () => {
+        const ok = await showConfirm("🚪","Remove "+member.username+"?","They will be removed from this group chat.");
+        if (!ok) return;
+        await db.ref("dmConversations/"+currentDMConvId+"/members/"+uid).remove();
+        await db.ref("dmMessages/"+currentDMConvId).push({
+          name: "System", message: member.username+" was removed from the group.",
+          time: new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),
+          timestamp: Date.now(), color: "var(--text-dim)", userId: "system", system: true
+        });
+        showToast(member.username+" removed.","ok");
+        openGCSettings(); // refresh
+      });
+      row.appendChild(removeBtn);
+    }
+    membersList.appendChild(row);
+  }
+
+  $("gcSettingsModal").style.display = "flex";
+}
+
+async function renameGC() {
+  if (!currentDMConvId) return;
+  const name = $("gcRenameInput").value.trim();
+  if (!name) return showToast("Enter a group name.","warn");
+  await db.ref("dmConversations/"+currentDMConvId).update({ groupName: name });
+  // Update header immediately
+  $("dmChatTitle").textContent = name;
+  renderDMConvList();
+  showToast("✅ Group renamed!","ok");
+}
+
+async function uploadGCPhoto() {
+  const file = $("gcPhotoInput").files[0];
+  if (!file) return;
+  if (file.size > 4 * 1024 * 1024) return showToast("Image too large (max 4MB).","warn");
+
+  showToast("Uploading photo...","ok");
+  const formData = new FormData();
+  formData.append("image", file);
+  try {
+    const res = await fetch("https://api.imgbb.com/1/upload?key="+IMGBB_KEY, { method:"POST", body: formData });
+    const data = await res.json();
+    if (!data.success) throw new Error("Upload failed");
+    const url = data.data.url;
+    await db.ref("dmConversations/"+currentDMConvId).update({ groupAvatarUrl: url });
+    // Update preview
+    const prevEl = $("gcAvatarPreview");
+    prevEl.innerHTML = "";
+    const img = document.createElement("img");
+    img.src = url; img.style.cssText = "width:100%;height:100%;object-fit:cover;";
+    prevEl.appendChild(img);
+    renderDMConvList();
+    showToast("✅ Group photo updated!","ok");
+  } catch(e) {
+    showToast("Failed to upload photo.","err");
+  }
+}
+
+async function addGCMembers() {
+  if (!currentDMConvId) return;
+  const checked = [...$("gcAddMemberList").querySelectorAll("input[type=checkbox]:checked")];
+  if (!checked.length) return showToast("Select at least one friend to add.","warn");
+
+  const snap = await db.ref("dmConversations/"+currentDMConvId+"/members").once("value");
+  const currentCount = snap.numChildren ? snap.numChildren() : Object.keys(snap.val()||{}).length;
+  if (currentCount + checked.length > 13) return showToast("Max 13 members in a group.","warn");
+
+  const updates = {};
+  const addedNames = [];
+  for (const cb of checked) {
+    const uid = cb.value;
+    const u = allUsersCache[uid] || {};
+    updates["dmConversations/"+currentDMConvId+"/members/"+uid] = {
+      username: u.username||"User", color: u.color||"#4da6ff", avatarUrl: u.avatarUrl||null, lastRead: 0
+    };
+    addedNames.push(u.username||"User");
+  }
+  await db.ref().update(updates);
+
+  // System message
+  await db.ref("dmMessages/"+currentDMConvId).push({
+    name: "System", message: addedNames.join(", ") + " joined the group.",
+    time: new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),
+    timestamp: Date.now(), color: "var(--text-dim)", userId: "system", system: true
+  });
+  await db.ref("dmConversations/"+currentDMConvId).update({ lastMessageAt: Date.now() });
+
+  showToast("✅ Members added!","ok");
+  renderDMConvList();
+  openGCSettings(); // refresh
+}
+
+async function leaveGC() {
+  if (!currentDMConvId) return;
+  const ok = await showConfirm("🚪","Leave Group?","You will no longer receive messages from this group.");
+  if (!ok) return;
+
+  const snap = await db.ref("dmConversations/"+currentDMConvId).once("value");
+  const conv = snap.val();
+
+  // If creator leaving, transfer ownership to next member or delete if alone
+  const memberUids = Object.keys(conv.members || {});
+  const remaining = memberUids.filter(uid => uid !== myUid);
+
+  if (!remaining.length) {
+    // Last member — delete the conversation
+    await db.ref("dmConversations/"+currentDMConvId).remove();
+    await db.ref("dmMessages/"+currentDMConvId).remove();
+  } else {
+    await db.ref("dmConversations/"+currentDMConvId+"/members/"+myUid).remove();
+    // If was creator, transfer to first remaining
+    if (conv.createdBy === myUid) {
+      await db.ref("dmConversations/"+currentDMConvId+"/createdBy").set(remaining[0]);
+    }
+    await db.ref("dmMessages/"+currentDMConvId).push({
+      name: "System", message: myUsername+" left the group.",
+      time: new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),
+      timestamp: Date.now(), color: "var(--text-dim)", userId: "system", system: true
+    });
+    await db.ref("dmConversations/"+currentDMConvId).update({ lastMessageAt: Date.now() });
+  }
+
+  $("gcSettingsModal").style.display = "none";
+  currentDMConvId = null;
+  $("dmChatbox").innerHTML = "";
+  $("dmChatTitle").textContent = "Select a conversation";
+  $("dmChatMembers").textContent = "";
+  $("dmInputRow").style.display = "none";
+  $("gcSettingsBtn").style.display = "none";
+  showToast("You left the group.","ok");
+  renderDMConvList();
+}
+
+// ============================================================
+// ============================================================
 // ============================================================
 function openInBlank() {
   const w = window.open("about:blank", "_blank");
