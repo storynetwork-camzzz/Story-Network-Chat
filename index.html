@@ -129,11 +129,6 @@
             <span class="ch-name">leaderboard</span>
             <span class="unread-pip" id="pip-leaderboard" style="display:none;"></span>
           </button>
-          <button class="channel-btn" data-channel="achievements">
-            <span class="ch-hash">🏅</span>
-            <span class="ch-name">achievements</span>
-            <span class="unread-pip" id="pip-achievements" style="display:none;"></span>
-          </button>
           <button class="channel-btn" data-channel="members">
             <span class="ch-hash">👥</span>
             <span class="ch-name">members</span>
@@ -143,6 +138,11 @@
             <span class="ch-hash">🤝</span>
             <span class="ch-name">friends</span>
             <span id="friendRequestBadge" class="req-badge" style="display:none;">0</span>
+          </button>
+          <button class="channel-btn" id="dmBtn">
+            <span class="ch-hash">💬</span>
+            <span class="ch-name">direct messages</span>
+            <span id="dmUnreadBadge" class="req-badge" style="display:none;">0</span>
           </button>
         </div>
 
@@ -304,7 +304,7 @@
         </div>
 
         <!-- Bio -->
-        <div class="profile-bio" id="profileBio" style="display:none;"></div>
+        <div class="profile-bio" id="profileBio"></div>
 
         <!-- Main stats -->
         <div class="profile-stats">
@@ -528,6 +528,86 @@
 
   <!-- Mobile sidebar overlay -->
   <div id="sidebarOverlay" style="display:none;" onclick="closeMobileSidebar()"></div>
+
+  <!-- ========== DM OVERLAY ========== -->
+  <div id="dmOverlay" style="display:none;">
+    <div id="dmContainer">
+      <div id="dmSidebar">
+        <div class="dm-sidebar-header">
+          <span>Messages</span>
+          <button id="dmClose" class="close-btn">✕</button>
+        </div>
+        <div id="dmConvList"></div>
+        <button id="newGroupBtn" class="dm-new-group-btn">+ New Group Chat</button>
+      </div>
+      <div id="dmChatArea">
+        <div id="dmChatHeader">
+          <div style="display:flex;flex-direction:column;flex:1;min-width:0;">
+            <div id="dmChatTitle">Select a conversation</div>
+            <div id="dmChatMembers"></div>
+          </div>
+          <button id="gcSettingsBtn" style="display:none;background:none;border:1px solid var(--border);border-radius:8px;padding:5px 10px;color:var(--text-muted);cursor:pointer;font-size:12px;flex-shrink:0;margin-left:8px;transition:all .15s;font-family:var(--font);font-weight:700;">&#x2699; Settings</button>
+        </div>
+        <div id="dmChatbox"></div>
+        <div id="dmInputRow" style="display:none;">
+          <textarea id="dmInput" placeholder="Message..." maxlength="500" rows="1"></textarea>
+          <button id="dmSendBtn">Send</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== NEW GROUP MODAL ========== -->
+  <div id="newGroupModal" style="display:none;">
+    <div class="confirm-card" style="width:420px;max-width:95vw;">
+      <div class="confirm-icon">&#x1F465;</div>
+      <h3>Create Group Chat</h3>
+      <p style="color:var(--text-muted);font-size:13px;">Add friends (max 13 members including you)</p>
+      <input id="groupNameInput" class="settings-input" placeholder="Group name (optional)" maxlength="40" style="width:100%;margin:10px 0;">
+      <div id="groupMemberList" style="max-height:240px;overflow-y:auto;margin-bottom:10px;"></div>
+      <div class="confirm-btns">
+        <button id="newGroupCancel" class="confirm-btn cancel">Cancel</button>
+        <button id="newGroupCreate" class="confirm-btn ok">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== GC SETTINGS MODAL ========== -->
+  <div id="gcSettingsModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);align-items:center;justify-content:center;z-index:600;backdrop-filter:blur(4px);">
+    <div class="confirm-card" style="width:440px;max-width:95vw;text-align:left;max-height:85vh;overflow-y:auto;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+        <h3 style="font-size:16px;font-weight:800;">Group Settings</h3>
+        <button id="gcSettingsClose" class="close-btn">✕</button>
+      </div>
+      <div style="margin-bottom:14px;">
+        <div style="font-size:10px;font-weight:800;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">Group Name</div>
+        <div style="display:flex;gap:8px;">
+          <input id="gcRenameInput" class="settings-input" placeholder="Group name..." maxlength="40" style="flex:1;">
+          <button id="gcRenameBtn" class="confirm-btn ok" style="padding:8px 14px;font-size:12px;">Save</button>
+        </div>
+      </div>
+      <div style="margin-bottom:14px;">
+        <div style="font-size:10px;font-weight:800;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">Group Photo</div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div id="gcAvatarPreview" style="width:48px;height:48px;border-radius:50%;background:var(--bg-lighter);display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0;overflow:hidden;border:2px solid var(--border);"></div>
+          <button id="gcPhotoBtn" class="confirm-btn cancel" style="font-size:12px;padding:7px 14px;">Upload Photo</button>
+          <input id="gcPhotoInput" type="file" accept="image/*" style="display:none;">
+        </div>
+      </div>
+      <div style="margin-bottom:14px;" id="gcAddMembersSection">
+        <div style="font-size:10px;font-weight:800;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">Add Members</div>
+        <div id="gcAddMemberList" style="max-height:120px;overflow-y:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:8px;padding:4px;min-height:36px;"></div>
+        <button id="gcAddMembersBtn" class="confirm-btn ok" style="font-size:12px;padding:7px 16px;width:100%;">Add Selected</button>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:800;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">Members</div>
+        <div id="gcMembersList" style="max-height:160px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:4px;min-height:36px;"></div>
+      </div>
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
+        <button id="gcLeaveBtn" class="confirm-btn cancel" style="width:100%;color:#ff4d4d;border-color:rgba(255,77,77,.3);">Leave Group</button>
+      </div>
+    </div>
+  </div>
 
   <script src="script.js"></script>
 </body>
