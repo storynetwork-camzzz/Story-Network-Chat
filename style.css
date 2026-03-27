@@ -337,8 +337,8 @@ code { background:var(--bg-lighter); border:1px solid var(--border); border-radi
 .poll-question { font-size:14px; font-weight:700; margin-bottom:4px; }
 .poll-expires { font-size:11px; color:var(--text-dim); margin-bottom:10px; }
 .poll-options-display { display:flex; flex-direction:column; gap:6px; }
-.poll-option-row { display:flex; align-items:center; gap:8px; }
-.poll-vote-btn { background:var(--bg-lighter); border:1px solid var(--border); border-radius:var(--radius-sm); padding:5px 12px; font-family:var(--font); font-size:12px; font-weight:600; color:var(--text-primary); cursor:pointer; min-width:80px; text-align:left; transition:all .15s; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:160px; }
+.poll-option-row { display:flex; align-items:center; gap:8px; flex-wrap:nowrap; }
+.poll-vote-btn { background:var(--bg-lighter); border:1px solid var(--border); border-radius:var(--radius-sm); padding:5px 12px; font-family:var(--font); font-size:12px; font-weight:600; color:var(--text-primary); cursor:pointer; min-width:80px; max-width:none; width:auto; text-align:left; transition:all .15s; white-space:normal; overflow:visible; word-break:break-word; }
 .poll-vote-btn:hover:not(:disabled) { border-color:var(--accent); background:var(--accent-light); }
 .poll-vote-btn.voted { border-color:var(--accent); background:var(--accent-light); color:var(--accent); }
 .poll-vote-btn:disabled { opacity:.6; cursor:default; }
@@ -479,7 +479,7 @@ code { background:var(--bg-lighter); border:1px solid var(--border); border-radi
 .size-btn.active,.size-btn:hover { background:var(--accent-light); border-color:var(--accent); color:var(--accent); }
 
 /* ============================================================ CONFIRM / POLL MODAL */
-#confirmDialog,#pollModal { position:fixed; inset:0; background:rgba(0,0,0,.7); display:flex; align-items:center; justify-content:center; z-index:300; backdrop-filter:blur(4px); }
+#confirmDialog,#pollModal { position:fixed; inset:0; background:rgba(0,0,0,.7); display:flex; align-items:center; justify-content:center; z-index:10000; backdrop-filter:blur(4px); }
 .confirm-card { background:var(--bg-dark); border:1px solid var(--border); border-radius:16px; padding:28px; width:340px; max-width:95vw; text-align:center; animation: cardIn 0.25s ease; }
 .confirm-icon { font-size:36px; margin-bottom:12px; display:block; }
 .confirm-card h3 { font-size:16px; font-weight:800; margin-bottom:8px; }
@@ -731,7 +731,7 @@ code { background:var(--bg-lighter); border:1px solid var(--border); border-radi
   position: fixed; inset: 0;
   background: rgba(0,0,0,.75);
   display: flex; align-items: center; justify-content: center;
-  z-index: 400;
+  z-index: 10000;
   backdrop-filter: blur(4px);
 }
 .friends-card {
@@ -1003,7 +1003,7 @@ code { background:var(--bg-lighter); border:1px solid var(--border); border-radi
 #newGroupModal {
   position: fixed; inset: 0; background: rgba(0,0,0,0.7);
   display: flex; align-items: center; justify-content: center;
-  z-index: 600; backdrop-filter: blur(4px);
+  z-index: 10000; backdrop-filter: blur(4px);
 }
 #groupMemberList::-webkit-scrollbar { width: 4px; }
 #groupMemberList::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
@@ -1036,4 +1036,54 @@ code { background:var(--bg-lighter); border:1px solid var(--border); border-radi
   #dmConvList { flex-direction: row; display: flex; overflow-x: auto; overflow-y: hidden; }
   .dm-conv-row { flex-direction: column; align-items: center; min-width: 80px; padding: 8px 6px; text-align: center; }
   .dm-conv-preview { display: none; }
+}
+
+/* ============================================================
+   NOTIFICATION SYSTEM
+   ============================================================ */
+#notifPanel {
+  display: none;
+  position: fixed; top: 56px; right: 0;
+  width: 320px; height: calc(100vh - 56px);
+  background: var(--bg-dark); border-left: 1px solid var(--border);
+  z-index: 1000; flex-direction: column;
+  box-shadow: -4px 0 24px rgba(0,0,0,0.4);
+}
+#notifPanel.open { display: flex; }
+#notifList::-webkit-scrollbar { width: 4px; }
+#notifList::-webkit-scrollbar-thumb { background: var(--bg-lighter); border-radius: 2px; }
+
+#dmToast {
+  position: fixed; bottom: 80px; right: 20px;
+  background: var(--bg-lighter); border: 1px solid var(--border);
+  border-radius: 12px; padding: 12px 16px;
+  z-index: 9998; max-width: 280px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  cursor: pointer; display: none;
+}
+#dmToast .dm-toast-inner { display: flex; align-items: center; gap: 10px; }
+
+@keyframes slideInRight {
+  from { transform: translateX(120%); opacity: 0; }
+  to   { transform: translateX(0);   opacity: 1; }
+}
+#dmToast[style*="block"] { animation: slideInRight .3s cubic-bezier(.22,1,.36,1); }
+
+/* Notification badge pulse */
+#notifBadge {
+  position: absolute; top: 3px; right: 3px;
+  width: 8px; height: 8px;
+  background: #ff4d4d; border-radius: 50%;
+  animation: notifPulse 1.5s ease infinite;
+}
+@keyframes notifPulse {
+  0%,100% { box-shadow: 0 0 0 0 rgba(255,77,77,.6); }
+  50%      { box-shadow: 0 0 0 4px rgba(255,77,77,0); }
+}
+
+/* Custom theme builder */
+#customThemeBuilder input[type=color] {
+  cursor: pointer; border-radius: 6px;
+  border: 1px solid var(--border); padding: 2px;
+  background: var(--bg-input);
 }
