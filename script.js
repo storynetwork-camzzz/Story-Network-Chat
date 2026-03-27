@@ -21,7 +21,7 @@ const IMGBB_KEY  = "7ae7b64cb4da961ab6a7d18d920099a8";
 const MAX_CHARS  = 250;
 const PAGE_SIZE  = 50;
 const WEEK_MS    = 7 * 24 * 60 * 60 * 1000;
-const BUILTIN_CHANNELS = ["general","offtopic","announcements","modchat","leaderboard","myleaderboard","rules","members","logs","reports"];
+const BUILTIN_CHANNELS = ["general","offtopic","announcements","modchat","leaderboard","myleaderboard","rules","members","logs","reports","broadcast"];
 function getAllChannels() {
   return [...BUILTIN_CHANNELS, ...Object.keys(customChannels)];
 }
@@ -77,10 +77,12 @@ let sending        = false;
 let activeColor    = "";
 let allUsersCache  = {};
 let myFriends      = {};
+let myBlocked      = {}; // UIDs I have blocked
 let displayedMsgs  = {};
 let msgListeners   = {};
 let appStarted     = false;
 let muteExpireTimer = null;
+let muteCountdownInterval = null;
 let leaderboardTimer = null;
 let searchActive   = false;
 let customRoles    = {};
@@ -211,10 +213,18 @@ const SLUR_REGEXES = BAD_WORDS.map(w => buildSlurRegex(w));
 
 function filterBadWords(msg) {
   const norm = normalizeText(msg);
-  // Check normalized version
-  if (BAD_WORDS.some(w => norm.includes(normalizeText(w)))) return true;
-  // Check regex patterns on original (catches spaced-out variants)
-  if (SLUR_REGEXES.some(re => re.test(msg))) return true;
+  // Use word-boundary style: only flag if bad word appears as a standalone token
+  // Split normalized text into words (by any non-alpha boundary) to avoid partial matches
+  const normWords = norm.split(/[^a-z]+/).filter(Boolean);
+  if (BAD_WORDS.some(w => {
+    const nw = normalizeText(w);
+    return normWords.includes(nw);
+  })) return true;
+  // Regex check on original for spaced-out variants, but require word boundaries
+  if (SLUR_REGEXES.some((re, i) => {
+    const wordRe = new RegExp("(?<![a-z])" + re.source + "(?![a-z])", "i");
+    return wordRe.test(msg);
+  })) return true;
   return false;
 }
 
@@ -585,6 +595,7 @@ $("logoutBtn").addEventListener("click", () => {
   clearTimeout(muteExpireTimer);
   clearInterval(leaderboardTimer);
   clearInterval(onlineMinuteTimer);
+  if (reportsListener) { db.ref("reports").off("value", reportsListener); reportsListener = null; }
   Object.values(msgListeners).forEach(({ ref: r, fn: f }) => { try { r.off("child_added", f); } catch(e){} });
   msgListeners = {};
   auth.signOut();
@@ -624,6 +635,9 @@ function startApp() {
     if ($("friendsModal") && $("friendsModal").style.display !== "none" && friendsModalTab === "friends") {
       renderFriendsModalTab("friends");
     }
+  });
+  db.ref("users/"+myUid+"/blocked").on("value", snap => {
+    myBlocked = snap.val() || {};
   });
   db.ref("friendRequests/"+myUid).on("value", snap => {
     renderFriendRequests(snap.val() || {});
@@ -682,6 +696,7 @@ function setupApp() {
   const dmBtn = $("dmBtn");
   if (dmBtn) dmBtn.addEventListener("click", openDMOverlay);
   setupDMSystem();
+  setupNotificationSystem();
 
   $("chatbox").addEventListener("scroll", function() {
     const dist = this.scrollHeight - this.scrollTop - this.clientHeight;
@@ -696,14 +711,35 @@ function setupApp() {
 function checkMuteStatus() {
   if (!myUid) return;
   clearTimeout(muteExpireTimer);
+  clearInterval(muteCountdownInterval);
   const muteData = mutedUids[myUid];
   if (muteData && muteData.until > Date.now()) {
-    const untilTime = new Date(muteData.until).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
-    $("muteUntilTime").textContent = untilTime;
     $("muteNotice").style.display = "flex";
     $("inputRow").style.display = "none";
     $("formatToolbar").style.display = "none";
+
+    function updateCountdown() {
+      const remaining = muteData.until - Date.now();
+      if (remaining <= 0) {
+        clearInterval(muteCountdownInterval);
+        db.ref("config/muted/"+myUid).remove();
+        $("muteNotice").style.display = "none";
+        if (currentChannel !== "announcements" && currentChannel !== "leaderboard" && currentChannel !== "myleaderboard") {
+          $("inputRow").style.display = "flex";
+          $("formatToolbar").style.display = "flex";
+        }
+        return;
+      }
+      const mins = Math.floor(remaining / 60000);
+      const secs = Math.floor((remaining % 60000) / 1000);
+      const untilTime = new Date(muteData.until).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+      $("muteUntilTime").textContent = untilTime + " (" + (mins > 0 ? mins+"m " : "") + secs+"s)";
+    }
+    updateCountdown();
+    muteCountdownInterval = setInterval(updateCountdown, 1000);
+
     muteExpireTimer = setTimeout(() => {
+      clearInterval(muteCountdownInterval);
       db.ref("config/muted/"+myUid).remove();
       $("muteNotice").style.display = "none";
       if (currentChannel !== "announcements" && currentChannel !== "leaderboard" && currentChannel !== "myleaderboard") {
@@ -843,6 +879,8 @@ function updateSidebarUser() {
 
   const modSection = $("modSection");
   if (modSection) modSection.style.display = (amOwner() || amMod()) ? "" : "none";
+  const broadcastBtn = $("broadcastBtn");
+  if (broadcastBtn) broadcastBtn.style.display = amOwner() ? "" : "none";
 
   renderSidebarAvatar();
   updateAnnouncementsUI();
@@ -1103,6 +1141,36 @@ async function renderFriendsModalTab(tab) {
       row.appendChild(av); row.appendChild(info); row.appendChild(btns);
       body.appendChild(row);
     });
+  } else if (tab === "blocked") {
+    const entries = Object.entries(myBlocked);
+    if (!entries.length) {
+      body.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim);font-size:13px;">You haven\'t blocked anyone.</div>';
+      return;
+    }
+    body.innerHTML = "";
+    entries.forEach(([uid, data]) => {
+      const u = allUsersCache[uid] || {};
+      const row = document.createElement("div"); row.className = "fm-row";
+      const av = buildAvatar(u.avatarUrl||null, data.username||u.username||"?", u.color||"#4da6ff", 38);
+      const info = document.createElement("div"); info.className = "fm-info";
+      const nameEl = document.createElement("div"); nameEl.className = "fm-name";
+      nameEl.textContent = data.username || u.username || "Unknown"; nameEl.style.color = u.color||"#4da6ff";
+      const timeEl = document.createElement("div"); timeEl.className = "fm-status";
+      timeEl.textContent = "Blocked " + (data.blockedAt ? new Date(data.blockedAt).toLocaleDateString() : "");
+      info.appendChild(nameEl); info.appendChild(timeEl);
+      const btns = document.createElement("div"); btns.className = "fm-btns";
+      const unblockBtn = document.createElement("button"); unblockBtn.className = "confirm-btn ok fm-btn";
+      unblockBtn.style.cssText = "background:rgba(87,242,135,0.1);border-color:rgba(87,242,135,0.3);color:#57f287;";
+      unblockBtn.textContent = "✅ Unblock";
+      unblockBtn.addEventListener("click", async () => {
+        await db.ref("users/"+myUid+"/blocked/"+uid).remove();
+        showToast("✅ " + (data.username||"User") + " unblocked.", "ok");
+        renderFriendsModalTab("blocked");
+      });
+      btns.appendChild(unblockBtn);
+      row.appendChild(av); row.appendChild(info); row.appendChild(btns);
+      body.appendChild(row);
+    });
   }
 }
 
@@ -1182,13 +1250,17 @@ async function openProfile(targetUid) {
   if (isOwner(targetUid)) { const b=document.createElement("span"); b.className="owner-badge"; b.textContent="[Owner]"; badgesEl.appendChild(b); }
   if (isMod(targetUid))   { const b=document.createElement("span"); b.className="mod-badge"; b.textContent="[Mod]"; badgesEl.appendChild(b); }
   if (isDev(targetUid))   { const b=document.createElement("span"); b.className="dev-badge"; b.textContent="[Dev]"; badgesEl.appendChild(b); }
-  if (userData.customRole && customRoles[userData.customRole]) {
-    const cr = customRoles[userData.customRole];
-    const b = document.createElement("span");
-    b.textContent = "[" + cr.name + "]";
-    b.style.cssText = `font-size:10px;font-weight:800;padding:2px 6px;border-radius:3px;background:${cr.color}22;color:${cr.color};border:1px solid ${cr.color}55;`;
-    badgesEl.appendChild(b);
-  }
+  // Support both single customRole (legacy) and customRoles array
+  const userRoles = userData.customRoles || (userData.customRole ? [userData.customRole] : []);
+  userRoles.forEach(roleKey => {
+    if (customRoles[roleKey]) {
+      const cr = customRoles[roleKey];
+      const b = document.createElement("span");
+      b.textContent = "[" + cr.name + "]";
+      b.style.cssText = `font-size:10px;font-weight:800;padding:2px 6px;border-radius:3px;background:${cr.color}22;color:${cr.color};border:1px solid ${cr.color}55;margin-right:2px;`;
+      badgesEl.appendChild(b);
+    }
+  });
 
   // Status
   $("profileStatus").textContent = userData.status ? "💬 "+userData.status : "";
@@ -1246,10 +1318,12 @@ async function openProfile(targetUid) {
 
     // Friend button
     if (!myFriends[targetUid]) {
-      const friendBtn = document.createElement("button"); friendBtn.className="profile-action-btn friend-btn";
-      friendBtn.textContent = "➕ Add Friend";
-      friendBtn.addEventListener("click", () => { sendFriendRequest(targetUid); friendBtn.textContent="✅ Sent!"; friendBtn.disabled=true; });
-      actionsEl.appendChild(friendBtn);
+      if (!isBlocked(targetUid)) {
+        const friendBtn = document.createElement("button"); friendBtn.className="profile-action-btn friend-btn";
+        friendBtn.textContent = "➕ Add Friend";
+        friendBtn.addEventListener("click", () => { sendFriendRequest(targetUid); friendBtn.textContent="✅ Sent!"; friendBtn.disabled=true; });
+        actionsEl.appendChild(friendBtn);
+      }
     } else {
       const friendedBtn = document.createElement("button"); friendedBtn.className="profile-action-btn friend-btn"; friendedBtn.disabled=true;
       friendedBtn.textContent = "✅ Friends";
@@ -1258,6 +1332,21 @@ async function openProfile(targetUid) {
       dmProfileBtn.textContent = "💬 Send DM";
       dmProfileBtn.addEventListener("click", () => { $("profileModal").style.display="none"; openDMWith(targetUid); });
       actionsEl.appendChild(dmProfileBtn);
+    }
+
+    // Block / Unblock button
+    if (isBlocked(targetUid)) {
+      const unblockBtn = document.createElement("button"); unblockBtn.className="profile-action-btn";
+      unblockBtn.style.cssText = "border-color:rgba(87,242,135,0.4);color:#57f287;";
+      unblockBtn.textContent = "✅ Unblock";
+      unblockBtn.addEventListener("click", () => unblockUser(targetUid, username));
+      actionsEl.appendChild(unblockBtn);
+    } else {
+      const blockBtn = document.createElement("button"); blockBtn.className="profile-action-btn";
+      blockBtn.style.cssText = "border-color:rgba(255,77,77,0.3);color:#ff4d4d;";
+      blockBtn.textContent = "🚫 Block";
+      blockBtn.addEventListener("click", () => blockUser(targetUid, username));
+      actionsEl.appendChild(blockBtn);
     }
 
     if (canModerate() && !isOwner(targetUid)) {
@@ -1278,6 +1367,33 @@ async function openProfile(targetUid) {
         openProfile(targetUid);
       });
       actionsEl.appendChild(warnBtn);
+
+      // Set Custom Role (owner only, single role per user)
+      if (amOwner() && Object.keys(customRoles).length > 0) {
+        const currentRoleKey = (userData.customRoles && userData.customRoles[0]) || userData.customRole || "";
+        const roleBtn = document.createElement("button"); roleBtn.className="profile-action-btn";
+        roleBtn.style.cssText = "border-color:rgba(168,85,247,0.4);color:#a855f7;";
+        roleBtn.textContent = currentRoleKey ? "🏷️ Change Role" : "🏷️ Set Role";
+        roleBtn.addEventListener("click", async () => {
+          const roleKeys = Object.keys(customRoles);
+          const options = ["(none)", ...roleKeys.map(k => customRoles[k].name + " [" + k + "]")];
+          const choice = prompt("Set role for " + username + ":\n" + options.map((o,i) => i+": "+o).join("\n") + "\n\nEnter number:");
+          if (choice === null) return;
+          const idx = parseInt(choice);
+          if (isNaN(idx) || idx < 0 || idx >= options.length) return showToast("Invalid choice","warn");
+          if (idx === 0) {
+            await db.ref("users/"+targetUid).update({ customRole: null, customRoles: [] });
+            showToast("Role removed from " + username, "ok");
+          } else {
+            const selectedKey = roleKeys[idx - 1];
+            await db.ref("users/"+targetUid).update({ customRole: selectedKey, customRoles: [selectedKey] });
+            showToast("Role [" + customRoles[selectedKey].name + "] set for " + username, "ok");
+          }
+          $("profileModal").style.display = "none";
+          openProfile(targetUid);
+        });
+        actionsEl.appendChild(roleBtn);
+      }
 
       if (isMuted(targetUid)) {
         const unmuteBtn = document.createElement("button"); unmuteBtn.className="profile-action-btn mute-btn";
@@ -1435,6 +1551,34 @@ async function toggleRep(targetUid, targetUsername, btn) {
 }
 
 // ============================================================
+// BLOCKING SYSTEM
+// ============================================================
+function isBlocked(uid) { return !!myBlocked[uid]; }
+
+async function blockUser(targetUid, targetUsername) {
+  const ok = await showConfirm("🚫","Block "+targetUsername,"You won't see their messages and they can't DM you.");
+  if (!ok) return;
+  await db.ref("users/"+myUid+"/blocked/"+targetUid).set({ username: targetUsername, blockedAt: Date.now() });
+  // Remove from friends if friends
+  if (myFriends[targetUid]) {
+    await db.ref("users/"+myUid+"/friends/"+targetUid).remove();
+    await db.ref("users/"+targetUid+"/friends/"+myUid).remove();
+  }
+  // Cancel any pending friend requests both ways
+  await db.ref("friendRequests/"+myUid+"/"+targetUid).remove();
+  await db.ref("friendRequests/"+targetUid+"/"+myUid).remove();
+  showToast("🚫 "+targetUsername+" has been blocked.","ok");
+  $("profileModal").style.display = "none";
+}
+
+async function unblockUser(targetUid, targetUsername) {
+  await db.ref("users/"+myUid+"/blocked/"+targetUid).remove();
+  showToast("✅ "+targetUsername+" has been unblocked.","ok");
+  $("profileModal").style.display = "none";
+  openProfile(targetUid);
+}
+
+// ============================================================
 // TYPING
 // ============================================================
 function setTyping(active) {
@@ -1549,7 +1693,8 @@ function renderCustomChannelButtons() {
     if (ch.requiredRole === "mod") return amOwner() || amMod();
     if (ch.requiredRole === "dev") return isDev(myUid) || amOwner();
     const myUserData = allUsersCache[myUid] || {};
-    return amOwner() || myUserData.customRole === ch.requiredRole;
+    const myRoles = myUserData.customRoles || (myUserData.customRole ? [myUserData.customRole] : []);
+    return amOwner() || myRoles.includes(ch.requiredRole);
   };
 
   const visible = entries.filter(([, ch]) => canSeeChannel(ch));
@@ -1593,6 +1738,11 @@ function switchChannel(ch) {
   clearInterval(leaderboardTimer);
   clearSearchHighlights();
   if (searchActive) { $("searchInput").value = ""; }
+  // Tear down reports live listener if leaving reports channel
+  if (currentChannel === "reports" && reportsListener) {
+    db.ref("reports").off("value", reportsListener);
+    reportsListener = null;
+  }
 
   currentChannel = ch;
   $("chatbox").innerHTML = "";
@@ -1605,7 +1755,7 @@ function switchChannel(ch) {
     announcements:"announcements", modchat:"mod-chat",
     leaderboard:"leaderboard", myleaderboard:"my leaderboard",
     rules:"rules", members:"members",
-    logs:"mod-logs", reports:"reports"
+    logs:"mod-logs", reports:"reports", broadcast:"send-notification"
   };
   const chLabel = builtinLabels[ch] || (customChannels[ch] ? customChannels[ch].name : ch);
   $("channelLabel").textContent = chLabel;
@@ -1616,7 +1766,7 @@ function switchChannel(ch) {
   const isRules = ch === "rules";
   const isModChat = ch === "modchat";
   const isLeaderboard = ch === "leaderboard" || ch === "myleaderboard";
-  const isSpecialReadOnly = ch === "members" || ch === "logs" || ch === "reports";
+  const isSpecialReadOnly = ch === "members" || ch === "logs" || ch === "reports" || ch === "broadcast";
 
   $("inputRow").style.display = "flex";
   $("formatToolbar").style.display = "flex";
@@ -1642,10 +1792,11 @@ function switchChannel(ch) {
     const chData = customChannels[ch];
     if (chData.private) {
       const myUserData = allUsersCache[myUid] || {};
+      const myRoles = myUserData.customRoles || (myUserData.customRole ? [myUserData.customRole] : []);
       const hasAccess = amOwner()
         || (chData.requiredRole === "mod" && amMod())
         || (chData.requiredRole === "dev" && isDev(myUid))
-        || myUserData.customRole === chData.requiredRole;
+        || myRoles.includes(chData.requiredRole);
       if (!hasAccess) {
         $("inputRow").style.display = "none";
         $("formatToolbar").style.display = "none";
@@ -1674,6 +1825,8 @@ function switchChannel(ch) {
     renderLogsChannel();
   } else if (ch === "reports") {
     renderReportsChannel();
+  } else if (ch === "broadcast") {
+    renderBroadcastChannel();
   } else {
     loadMessages(ch);
   }
@@ -1953,72 +2106,121 @@ async function renderLogsChannel() {
 // ============================================================
 // REPORTS CHANNEL (mod only)
 // ============================================================
-async function renderReportsChannel() {
+function renderReportsChannel() {
   if (!canModerate()) {
     $("chatbox").innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-dim);">🔒 Moderators only.</div>';
     return;
   }
+
+  // Tear down any previous listener
+  if (reportsListener) { db.ref("reports").off("value", reportsListener); reportsListener = null; }
+
   const chatbox = $("chatbox");
   chatbox.innerHTML = '<div style="padding:16px;color:var(--text-muted);font-size:12px;">Loading reports...</div>';
 
-  const snap = await db.ref("reports").orderByChild("timestamp").limitToLast(100).once("value");
-  const reports = snap.val() || {};
-  chatbox.innerHTML = "";
+  function buildReportsUI(reports) {
+    if (currentChannel !== "reports") return;
+    chatbox.innerHTML = "";
 
-  const title = document.createElement("div");
-  title.style.cssText = "padding:20px 16px 8px;font-size:18px;font-weight:800;color:var(--text-primary);";
-  title.textContent = "🚩 Reported Messages";
-  chatbox.appendChild(title);
+    const title = document.createElement("div");
+    title.style.cssText = "padding:20px 16px 8px;font-size:18px;font-weight:800;color:var(--text-primary);";
+    title.textContent = "🚩 Reported Messages";
+    chatbox.appendChild(title);
 
-  const entries = Object.entries(reports).sort((a,b) => b[1].timestamp - a[1].timestamp);
-  if (!entries.length) {
-    chatbox.innerHTML += '<div style="padding:20px;color:var(--text-dim);text-align:center;">No reports yet.</div>';
-    return;
-  }
-
-  entries.forEach(([reportId, r]) => {
-    const card = document.createElement("div");
-    card.style.cssText = "margin:8px 12px;padding:14px 16px;border-radius:10px;background:var(--bg-lighter);border:1px solid var(--border);";
-
-    const time = new Date(r.timestamp).toLocaleString();
-    card.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;">
-        <div>
-          <span style="font-weight:800;color:#f472b6;">🚩 Report</span>
-          <span style="font-size:11px;color:var(--text-dim);margin-left:8px;">${time}</span>
-        </div>
-        <span style="font-size:11px;padding:2px 8px;border-radius:4px;background:var(--bg-input);color:var(--text-muted);">#${esc(r.channel||"")}</span>
-      </div>
-      <div style="margin-bottom:8px;padding:10px;border-radius:8px;background:var(--bg-input);border-left:3px solid var(--accent);">
-        <div style="font-size:12px;color:var(--text-muted);margin-bottom:3px;"><strong style="color:var(--accent);">${esc(r.messageAuthor||"?")}</strong> said:</div>
-        <div style="font-size:13px;color:var(--text-primary);">${esc((r.message||"[media]").substring(0,200))}</div>
-      </div>
-      <div style="font-size:12px;color:var(--text-muted);">
-        <strong>Reason:</strong> ${esc(r.reason||"")}
-        &nbsp;·&nbsp;<strong>Reported by:</strong> ${esc(r.reportedBy||"")}
-      </div>
-    `;
-
-    // Action buttons
-    const btns = document.createElement("div");
-    btns.style.cssText = "display:flex;gap:8px;margin-top:10px;";
-
-    const viewBtn = document.createElement("button"); viewBtn.className="confirm-btn ok";
-    viewBtn.style.cssText = "padding:5px 12px;font-size:12px;";
-    viewBtn.textContent = "👤 View User";
-    viewBtn.addEventListener("click", () => openProfile(r.messageAuthorUid));
-
-    const dismissBtn = document.createElement("button"); dismissBtn.className="confirm-btn cancel";
-    dismissBtn.style.cssText = "padding:5px 12px;font-size:12px;";
-    dismissBtn.textContent = "✓ Dismiss";
-    dismissBtn.addEventListener("click", async () => {
-      await db.ref("reports/"+reportId).remove();
-      card.remove();
+    const entries = Object.entries(reports).sort((a,b) => {
+      if (!!a[1].resolved !== !!b[1].resolved) return a[1].resolved ? 1 : -1;
+      return b[1].timestamp - a[1].timestamp;
     });
 
-    btns.appendChild(viewBtn); btns.appendChild(dismissBtn);
-    card.appendChild(btns);
-    chatbox.appendChild(card);
+    if (!entries.length) {
+      const empty = document.createElement("div");
+      empty.style.cssText = "padding:20px;color:var(--text-dim);text-align:center;";
+      empty.textContent = "No reports yet.";
+      chatbox.appendChild(empty);
+      return;
+    }
+
+    entries.forEach(([reportId, r]) => {
+      const isResolved = !!r.resolved;
+      const card = document.createElement("div");
+      card.style.cssText = `margin:8px 12px;padding:14px 16px;border-radius:10px;background:var(--bg-lighter);border:1px solid ${isResolved ? "rgba(87,242,135,0.4)" : "var(--border)"};${isResolved ? "opacity:0.75;" : ""}`;
+
+      const time = new Date(r.timestamp).toLocaleString();
+      card.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;">
+          <div>
+            <span style="font-weight:800;color:${isResolved ? "#57f287" : "#f472b6"};">${isResolved ? "✅ Resolved" : "🚩 Report"}</span>
+            <span style="font-size:11px;color:var(--text-dim);margin-left:8px;">${time}</span>
+            ${isResolved && r.resolvedBy ? `<span style="font-size:11px;color:#57f287;margin-left:8px;">by ${esc(r.resolvedBy)}</span>` : ""}
+          </div>
+          <span style="font-size:11px;padding:2px 8px;border-radius:4px;background:var(--bg-input);color:var(--text-muted);">#${esc(r.channel||"")}</span>
+        </div>
+        <div style="margin-bottom:8px;padding:10px;border-radius:8px;background:var(--bg-input);border-left:3px solid var(--accent);">
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:3px;"><strong style="color:var(--accent);">${esc(r.messageAuthor||"?")}</strong> said:</div>
+          <div style="font-size:13px;color:var(--text-primary);">${esc((r.message||"[media]").substring(0,200))}</div>
+        </div>
+        <div style="font-size:12px;color:var(--text-muted);">
+          <strong>Reason:</strong> ${esc(r.reason||"")}
+          &nbsp;·&nbsp;<strong>Reported by:</strong> ${esc(r.reportedBy||"")}
+        </div>
+      `;
+
+      const btns = document.createElement("div");
+      btns.style.cssText = "display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;";
+
+      if (!isResolved) {
+        const viewBtn = document.createElement("button"); viewBtn.className="confirm-btn ok";
+        viewBtn.style.cssText = "padding:5px 12px;font-size:12px;";
+        viewBtn.textContent = "👤 View User";
+        viewBtn.addEventListener("click", () => openProfile(r.messageAuthorUid));
+
+        const warnBtn = document.createElement("button"); warnBtn.className="confirm-btn ok";
+        warnBtn.style.cssText = "padding:5px 12px;font-size:12px;background:rgba(251,191,36,0.15);border-color:rgba(251,191,36,0.4);color:#fbbf24;";
+        warnBtn.textContent = "⚠️ Warn";
+        warnBtn.addEventListener("click", async () => { await warnUser(r.messageAuthorUid, r.messageAuthor||"User"); });
+
+        const muteBtn = document.createElement("button"); muteBtn.className="confirm-btn ok";
+        muteBtn.style.cssText = "padding:5px 12px;font-size:12px;background:rgba(249,115,22,0.15);border-color:rgba(249,115,22,0.4);color:#f97316;";
+        muteBtn.textContent = "🔇 Mute";
+        muteBtn.addEventListener("click", async () => { await muteUser(r.messageAuthorUid, r.messageAuthor||"User"); });
+
+        const banBtn = document.createElement("button"); banBtn.className="confirm-btn cancel";
+        banBtn.style.cssText = "padding:5px 12px;font-size:12px;color:#ff4d4d;border-color:rgba(255,77,77,.4);";
+        banBtn.textContent = "🔨 Ban";
+        banBtn.addEventListener("click", async () => { await banUser(r.messageAuthorUid, r.messageAuthor||"User"); });
+
+        const resolveBtn = document.createElement("button"); resolveBtn.className="confirm-btn ok";
+        resolveBtn.style.cssText = "padding:5px 12px;font-size:12px;background:rgba(87,242,135,0.15);border-color:rgba(87,242,135,0.4);color:#57f287;";
+        resolveBtn.textContent = "✅ Resolve";
+        resolveBtn.addEventListener("click", async () => {
+          await db.ref("reports/"+reportId).update({ resolved: true, resolvedBy: myUsername, resolvedAt: Date.now() });
+          showToast("✅ Report marked as resolved.", "ok");
+          // Live listener auto-updates for all mods
+        });
+
+        btns.appendChild(viewBtn); btns.appendChild(warnBtn); btns.appendChild(muteBtn); btns.appendChild(banBtn); btns.appendChild(resolveBtn);
+      } else {
+        if (amOwner()) {
+          const unresolveBtn = document.createElement("button"); unresolveBtn.className="confirm-btn cancel";
+          unresolveBtn.style.cssText = "padding:5px 12px;font-size:12px;";
+          unresolveBtn.textContent = "↩ Un-resolve";
+          unresolveBtn.addEventListener("click", async () => {
+            await db.ref("reports/"+reportId).update({ resolved: false, resolvedBy: null, resolvedAt: null });
+            showToast("Report re-opened.", "ok");
+            // Live listener auto-updates
+          });
+          btns.appendChild(unresolveBtn);
+        }
+      }
+
+      card.appendChild(btns);
+      chatbox.appendChild(card);
+    });
+  }
+
+  // Live listener — fires for all mods instantly on any resolve/unresolve
+  reportsListener = db.ref("reports").orderByChild("timestamp").limitToLast(100).on("value", snap => {
+    buildReportsUI(snap.val() || {});
   });
 }
 function loadMessages(ch) {
@@ -2129,6 +2331,8 @@ document.addEventListener("click", e => {
 function renderMessage(data, ch, isNew, prepend) {
   prepend = prepend || false;
   const { key, message, time, userId, color, avatarUrl, replyTo } = data;
+  // Don't render messages from blocked users
+  if (userId && userId !== myUid && isBlocked(userId)) return;
   const name        = data.name || "Unknown";
   const isMine      = userId === myUid;
   const nameColor   = color || "#ffffff";
@@ -2180,13 +2384,16 @@ function renderMessage(data, ch, isNew, prepend) {
     badge.textContent="[Dev]"; nameWrap.appendChild(badge);
   }
   const userDataForRole = allUsersCache[userId] || {};
-  if (userDataForRole.customRole && customRoles[userDataForRole.customRole]) {
-    const cr = customRoles[userDataForRole.customRole];
-    const badge = document.createElement("span");
-    badge.textContent = "[" + cr.name + "]";
-    badge.style.cssText = `font-size:10px;font-weight:800;color:${cr.color};text-shadow:0 0 6px ${cr.color}88;margin-right:3px;`;
-    nameWrap.appendChild(badge);
-  }
+  const msgRoles = userDataForRole.customRoles || (userDataForRole.customRole ? [userDataForRole.customRole] : []);
+  msgRoles.forEach(roleKey => {
+    if (customRoles[roleKey]) {
+      const cr = customRoles[roleKey];
+      const badge = document.createElement("span");
+      badge.textContent = "[" + cr.name + "]";
+      badge.style.cssText = `font-size:10px;font-weight:800;color:${cr.color};text-shadow:0 0 6px ${cr.color}88;margin-right:3px;`;
+      nameWrap.appendChild(badge);
+    }
+  });
 
   const uname = document.createElement("span");
   uname.className = "msg-username";
@@ -2311,6 +2518,12 @@ function renderMessage(data, ch, isNew, prepend) {
 
   bubble.appendChild(actionBar);
   bubble.addEventListener("click", e => {
+    // Mod/owner shift-click = instant delete
+    if (e.shiftKey && canModerate()) {
+      db.ref("messages/"+ch+"/"+key).remove();
+      showToast("🗑️ Message deleted","ok");
+      return;
+    }
     const isOpen = actionBar.classList.contains("open");
     closeAllActionBars(); closeAllEmojiPickers();
     if (!isOpen) { actionBar.classList.add("open"); requestAnimationFrame(() => { if (!userScrolledUp) scrollToBottom(true); }); }
@@ -2908,6 +3121,7 @@ function openLightbox(src) {
 
 function updateCharCounter() {
   const len=$("msgInput").value.length, el=$("charCounter");
+  if (amOwner()) { el.textContent="∞"; el.className="char-counter"; return; }
   el.textContent=len+"/"+MAX_CHARS;
   el.className="char-counter"+(len>=MAX_CHARS?" over":len>=MAX_CHARS*0.8?" warn":"");
 }
@@ -3016,7 +3230,7 @@ function sendMessage() {
   if (sending || now-lastSentTime<1200) return;
   const raw=$("msgInput").value.trim();
   if (!raw) return;
-  if (raw.length>MAX_CHARS) return showToast("Message too long!","warn");
+  if (raw.length>MAX_CHARS && !amOwner()) return showToast("Message too long!","warn");
   if (filterBadWords(raw)) {
     showToast("⚠️ Message contains disallowed words. You have been muted for 30 minutes.","warn");
     applySlurTimeout(raw);
@@ -3132,6 +3346,7 @@ function openSettings() {
   $("statusInput").value=myStatus||"";
   $("bioInput").value=myBio||"";
   checkUsernameCooldown();
+  buildCustomThemeBuilder();
 }
 function closeSettings(){ $("settingsOverlay").style.display="none"; }
 
@@ -3330,6 +3545,69 @@ function buildSizeRow() {
 }
 function applyTextSize(size){ $("chatbox").style.fontSize=size; }
 
+function buildCustomThemeBuilder() {
+  const btn = $("applyCustomThemeBtn");
+  if (!btn) return;
+  // Load saved custom theme values
+  const saved = JSON.parse(localStorage.getItem("snc_custom_theme")||"{}");
+  if (saved.accent) $("ct_accent").value = saved.accent;
+  if (saved.bg) $("ct_bg").value = saved.bg;
+  if (saved.sidebar) $("ct_sidebar").value = saved.sidebar;
+  if (saved.text) $("ct_text").value = saved.text;
+  if (saved.msgmine) $("ct_msgmine").value = saved.msgmine;
+  if (saved.msgother) $("ct_msgother").value = saved.msgother;
+
+  btn.addEventListener("click", () => {
+    const accent = $("ct_accent").value;
+    const bg = $("ct_bg").value;
+    const sidebar = $("ct_sidebar").value;
+    const text = $("ct_text").value;
+    const msgmine = $("ct_msgmine").value;
+    const msgother = $("ct_msgother").value;
+
+    // Derive glow/hover/light variants from accent
+    const root = document.documentElement;
+    root.style.setProperty("--accent", accent);
+    root.style.setProperty("--accent-hover", shadeColor(accent, -20));
+    root.style.setProperty("--accent-glow", hexToRgba(accent, 0.35));
+    root.style.setProperty("--accent-light", hexToRgba(accent, 0.12));
+    root.style.setProperty("--bg-darkest", shadeColor(bg, -30));
+    root.style.setProperty("--bg-dark", bg);
+    root.style.setProperty("--bg-mid", shadeColor(bg, 10));
+    root.style.setProperty("--bg-light", shadeColor(bg, 18));
+    root.style.setProperty("--bg-lighter", shadeColor(bg, 25));
+    root.style.setProperty("--bg-input", shadeColor(bg, 32));
+    root.style.setProperty("--text-primary", text);
+    root.style.setProperty("--text-muted", shadeColor(text, -30));
+    root.style.setProperty("--text-dim", shadeColor(text, -60));
+    root.style.setProperty("--border", hexToRgba(accent, 0.1));
+    root.style.setProperty("--border-hover", hexToRgba(accent, 0.28));
+    root.style.setProperty("--msg-mine", msgmine);
+    root.style.setProperty("--msg-other", msgother);
+
+    // Mark as custom active in theme grid
+    document.querySelectorAll(".theme-card").forEach(c => c.classList.remove("active"));
+
+    const customVals = { accent, bg, sidebar, text, msgmine, msgother };
+    localStorage.setItem("snc_custom_theme", JSON.stringify(customVals));
+    localStorage.setItem("snc_theme", "__custom__");
+    showToast("🎨 Custom theme applied!", "ok");
+  });
+}
+
+function hexToRgba(hex, alpha) {
+  const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+function shadeColor(hex, pct) {
+  let r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+  r = Math.max(0,Math.min(255, r + Math.round(pct*2.55)));
+  g = Math.max(0,Math.min(255, g + Math.round(pct*2.55)));
+  b = Math.max(0,Math.min(255, b + Math.round(pct*2.55)));
+  return "#"+[r,g,b].map(v=>v.toString(16).padStart(2,"0")).join("");
+}
+
 // ============================================================
 // DM SYSTEM
 // ============================================================
@@ -3339,6 +3617,7 @@ let dmUnreadCounts = {};
 let dmConvListener = null; // live listener for conv list
 let dmRenderedIds = {}; // track rendered message IDs per conv to prevent duplicates
 let dmRenderListTimer = null; // debounce re-renders of conv list
+let reportsListener = null; // live listener for reports channel
 
 function getDMConvId(uid1, uid2) {
   return [uid1, uid2].sort().join("_dm_");
@@ -3352,6 +3631,26 @@ function setupDMSystem() {
   $("dmInput").addEventListener("input", () => {
     $("dmInput").style.height = "auto";
     $("dmInput").style.height = Math.min($("dmInput").scrollHeight, 120) + "px";
+  });
+  $("dmImageBtn").addEventListener("click", () => $("dmImageInput").click());
+  $("dmImageInput").addEventListener("change", async () => {
+    const file = $("dmImageInput").files[0]; if (!file) return;
+    $("dmImageInput").value = "";
+    if (!currentDMConvId) return showToast("Select a conversation first.","warn");
+    if (file.size > 5*1024*1024) return showToast("Image must be under 5MB","err");
+    showToast("📤 Uploading image...","ok");
+    const url = await uploadImgBB(file);
+    if (!url) return showToast("Image upload failed","err");
+    const now = Date.now();
+    const msgData = {
+      name: myUsername, message: "📷 Image",
+      type: "image", imageUrl: url,
+      time: new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),
+      timestamp: now, color: myColor, userId: myUid, avatarUrl: myAvatar||null
+    };
+    await db.ref("dmMessages/"+currentDMConvId).push(msgData);
+    await db.ref("dmConversations/"+currentDMConvId).update({ lastMessage: "📷 Image", lastMessageAt: now });
+    await db.ref("dmConversations/"+currentDMConvId+"/members/"+myUid+"/lastRead").set(now);
   });
   $("newGroupBtn").addEventListener("click", openNewGroupModal);
   $("newGroupCancel").addEventListener("click", () => $("newGroupModal").style.display = "none");
@@ -3393,10 +3692,30 @@ function setupDMSystem() {
 
 function openDMOverlay() {
   $("dmOverlay").style.display = "flex";
-  renderDMConvList();
+  renderDMConvList().then(() => {
+    // Auto-select last opened DM
+    const lastId = localStorage.getItem("snc_last_dm_conv");
+    if (lastId && !currentDMConvId) {
+      db.ref("dmConversations/"+lastId).once("value", snap => {
+        if (snap.exists() && snap.val().members && snap.val().members[myUid]) {
+          openDMConversation(lastId);
+        } else {
+          // fallback: pick the most recent conv
+          db.ref("dmConversations").orderByChild("lastMessageAt").limitToLast(1).once("value", s => {
+            s.forEach(c => { if (c.val().members && c.val().members[myUid]) openDMConversation(c.key); });
+          });
+        }
+      });
+    } else if (!currentDMConvId) {
+      db.ref("dmConversations").orderByChild("lastMessageAt").limitToLast(1).once("value", s => {
+        s.forEach(c => { if (c.val().members && c.val().members[myUid]) openDMConversation(c.key); });
+      });
+    }
+  });
 }
 
 function openDMWith(friendUid) {
+  if (isBlocked(friendUid)) return showToast("You have blocked this user.","warn");
   $("dmOverlay").style.display = "flex";
   const convId = getDMConvId(myUid, friendUid);
   db.ref("dmConversations/"+convId).once("value", snap => {
@@ -3419,7 +3738,6 @@ function openDMWith(friendUid) {
 
 async function renderDMConvList() {
   const list = $("dmConvList");
-
   const snap = await db.ref("dmConversations").once("value");
   list.innerHTML = "";
   if (!snap.exists()) {
@@ -3430,7 +3748,8 @@ async function renderDMConvList() {
   const dms = [], groups = [];
   snap.forEach(child => {
     const conv = child.val();
-    if (conv && conv.members && conv.members[myUid]) {
+    // Only show conversations where this user is still a member (not just referenced)
+    if (conv && conv.members && conv.members[myUid] !== undefined && conv.members[myUid] !== null) {
       const obj = { id: child.key, ...conv };
       if (conv.type === "group") groups.push(obj);
       else dms.push(obj);
@@ -3521,6 +3840,7 @@ function openDMConversation(convId) {
   }
 
   currentDMConvId = convId;
+  localStorage.setItem("snc_last_dm_conv", convId);
   dmRenderedIds[convId] = {};
 
   db.ref("dmConversations/"+convId+"/members/"+myUid+"/lastRead").set(Date.now());
@@ -3529,6 +3849,14 @@ function openDMConversation(convId) {
   db.ref("dmConversations/"+convId).once("value", snap => {
     if (!snap.exists()) return;
     const conv = snap.val();
+    // Guard: don't open a conversation the user is no longer a member of
+    if (!conv.members || conv.members[myUid] === undefined || conv.members[myUid] === null) {
+      if (currentDMConvId === convId) currentDMConvId = null;
+      const storedLast = localStorage.getItem("snc_last_dm_conv");
+      if (storedLast === convId) localStorage.removeItem("snc_last_dm_conv");
+      renderDMConvList();
+      return;
+    }
     const isGroup = conv.type === "group";
 
     const titleEl = $("dmChatTitle");
@@ -3567,21 +3895,31 @@ function openDMConversation(convId) {
 
       // Live listener: child_added fires for ALL existing + new children,
       // so we use the rendered ID set to skip already-shown messages
-      const fn = msgRef.orderByChild("timestamp").on("child_added", child => {
+      const liveQuery = msgRef.orderByChild("timestamp");
+      const fn = child => {
         const id = child.key;
         if (dmRenderedIds[convId] && dmRenderedIds[convId][id]) return; // already rendered
         if (!dmRenderedIds[convId]) return;
         dmRenderedIds[convId][id] = true;
-        renderDMMessage({ id, ...child.val() }, convId, true);
+        const msgData = { id, ...child.val() };
+        renderDMMessage(msgData, convId, true);
         db.ref("dmConversations/"+convId+"/members/"+myUid+"/lastRead").set(Date.now());
-      });
-      dmListeners[convId] = { ref: msgRef.orderByChild("timestamp"), fn };
+        // Fire DM notification toast if message is from someone else
+        if (msgData.userId && msgData.userId !== myUid) {
+          triggerDMNotification(convId, msgData.userId, msgData.name, msgData.color, msgData.avatarUrl, msgData.type==="image"?"📷 Image":(msgData.message||"").substring(0,60));
+        }
+      };
+      liveQuery.on("child_added", fn);
+      dmListeners[convId] = { ref: liveQuery, fn };
     });
   });
 }
 
 function renderDMMessage(data, convId, isNew) {
   const chatbox = $("dmChatbox");
+
+  // Don't render messages from blocked users (in group chats)
+  if (data.userId && data.userId !== myUid && isBlocked(data.userId)) return;
 
   // System messages (join/leave/remove notices)
   if (data.system || data.userId === "system") {
@@ -3614,7 +3952,16 @@ function renderDMMessage(data, convId, isNew) {
   }
 
   const textEl = document.createElement("div"); textEl.className = "dm-msg-text";
-  textEl.innerHTML = parseMessage(data.message || "");
+  if (data.type === "image" && data.imageUrl) {
+    const img = document.createElement("img");
+    img.src = data.imageUrl;
+    img.style.cssText = "max-width:260px;max-height:260px;border-radius:8px;cursor:zoom-in;display:block;margin-top:4px;";
+    img.addEventListener("click", () => openLightbox(data.imageUrl));
+    img.addEventListener("load", () => { if (isNew) chatbox.scrollTop = chatbox.scrollHeight; });
+    textEl.appendChild(img);
+  } else {
+    textEl.innerHTML = parseMessage(data.message || "");
+  }
   bubble.appendChild(textEl);
 
   const footer = document.createElement("div"); footer.className = "dm-msg-footer";
@@ -3665,12 +4012,16 @@ async function sendDMMessage() {
   const convSnap = await db.ref("dmConversations/"+currentDMConvId).once("value");
   if (!convSnap.exists()) return;
   const conv = convSnap.val();
-  if (!conv.members || !conv.members[myUid]) return showToast("You are not in this conversation.","err");
+  // Strict membership check: user must still be a member (not removed/left)
+  if (!conv.members || conv.members[myUid] === undefined || conv.members[myUid] === null) {
+    return showToast("You are no longer in this conversation.","err");
+  }
 
   // Only require friendship for 1-on-1 DMs, not group chats
   if (conv.type === "dm") {
     const otherUid = Object.keys(conv.members).find(uid => uid !== myUid);
     if (!myFriends[otherUid]) return showToast("You must be friends to send DMs.","warn");
+    if (isBlocked(otherUid)) return showToast("You have blocked this user.","warn");
   }
 
   input.value = ""; input.style.height = "auto";
@@ -3692,10 +4043,10 @@ function openNewGroupModal() {
   $("newGroupModal").style.display = "flex";
   const list = $("groupMemberList");
   list.innerHTML = "";
-  // Show ALL users except yourself
-  const users = Object.entries(allUsersCache).filter(([uid]) => uid !== myUid);
+  // Only show friends
+  const users = Object.entries(allUsersCache).filter(([uid]) => uid !== myUid && !!myFriends[uid]);
   if (!users.length) {
-    list.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:8px;">No other users found.</div>';
+    list.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:8px;">You have no friends to add yet!</div>';
     return;
   }
   users.sort(([,a],[,b]) => (a.username||"").localeCompare(b.username||""));
@@ -3720,6 +4071,9 @@ async function createGroupChat() {
   const checked = [...$("groupMemberList").querySelectorAll("input[type=checkbox]:checked")];
   if (!checked.length) return showToast("Select at least one friend.","warn");
   const memberUids = checked.map(cb => cb.value);
+  // Only allow friends
+  const nonFriends = memberUids.filter(uid => !myFriends[uid]);
+  if (nonFriends.length) return showToast("You can only add friends to a group chat.","warn");
   if (memberUids.length + 1 > 13) return showToast("Max 13 members in a group.","warn");
 
   const groupName = $("groupNameInput").value.trim() || "Group Chat";
@@ -3773,15 +4127,15 @@ async function openGCSettings() {
     prevEl.textContent = "👥";
   }
 
-  // Add members: show ALL users not already in the group
+  // Add members: show only friends not already in the group
   const gcAddList = $("gcAddMemberList");
   gcAddList.innerHTML = "";
   const currentMemberUids = Object.keys(conv.members || {});
   const usersToAdd = Object.entries(allUsersCache)
-    .filter(([uid]) => uid !== myUid && !currentMemberUids.includes(uid))
+    .filter(([uid]) => uid !== myUid && !currentMemberUids.includes(uid) && !!myFriends[uid])
     .sort(([,a],[,b]) => (a.username||"").localeCompare(b.username||""));
   if (!usersToAdd.length) {
-    gcAddList.innerHTML = '<div style="font-size:11px;color:var(--text-dim);padding:8px;">Everyone is already in this group.</div>';
+    gcAddList.innerHTML = '<div style="font-size:11px;color:var(--text-dim);padding:8px;">No friends to add.</div>';
   } else {
     usersToAdd.forEach(([uid, u]) => {
       const isFriend = !!myFriends[uid];
@@ -3919,45 +4273,296 @@ async function leaveGC() {
   const ok = await showConfirm("🚪","Leave Group?","You will no longer receive messages from this group.");
   if (!ok) return;
 
-  const snap = await db.ref("dmConversations/"+currentDMConvId).once("value");
-  const conv = snap.val();
+  const leavingConvId = currentDMConvId;
 
-  // If creator leaving, transfer ownership to next member or delete if alone
-  const memberUids = Object.keys(conv.members || {});
-  const remaining = memberUids.filter(uid => uid !== myUid);
-
-  if (!remaining.length) {
-    // Last member — delete the conversation
-    await db.ref("dmConversations/"+currentDMConvId).remove();
-    await db.ref("dmMessages/"+currentDMConvId).remove();
-  } else {
-    await db.ref("dmConversations/"+currentDMConvId+"/members/"+myUid).remove();
-    // If was creator, transfer to first remaining
-    if (conv.createdBy === myUid) {
-      await db.ref("dmConversations/"+currentDMConvId+"/createdBy").set(remaining[0]);
-    }
-    await db.ref("dmMessages/"+currentDMConvId).push({
-      name: "System", message: myUsername+" left the group.",
-      time: new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),
-      timestamp: Date.now(), color: "var(--text-dim)", userId: "system", system: true
-    });
-    await db.ref("dmConversations/"+currentDMConvId).update({ lastMessageAt: Date.now() });
-  }
-
-  $("gcSettingsModal").style.display = "none";
+  // Immediately lock UI so the user can't interact while we process
   currentDMConvId = null;
+  $("gcSettingsModal").style.display = "none";
   $("dmChatbox").innerHTML = "";
   $("dmChatTitle").textContent = "Select a conversation";
   $("dmChatMembers").textContent = "";
   $("dmInputRow").style.display = "none";
   $("gcSettingsBtn").style.display = "none";
-  showToast("You left the group.","ok");
+
+  // Tear down listener immediately so no more messages render
+  if (dmListeners[leavingConvId]) {
+    try { dmListeners[leavingConvId].ref.off("child_added", dmListeners[leavingConvId].fn); } catch(e){}
+    delete dmListeners[leavingConvId];
+  }
+  if (dmRenderedIds[leavingConvId]) delete dmRenderedIds[leavingConvId];
+
+  // Clear from localStorage so reopening DM overlay doesn't restore this group
+  const storedLast = localStorage.getItem("snc_last_dm_conv");
+  if (storedLast === leavingConvId) localStorage.removeItem("snc_last_dm_conv");
+
+  const snap = await db.ref("dmConversations/"+leavingConvId).once("value");
+  if (!snap.exists()) {
+    showToast("You left the group.", "ok");
+    renderDMConvList();
+    return;
+  }
+  const conv = snap.val();
+
+  const memberUids = Object.keys(conv.members || {});
+  const remaining = memberUids.filter(uid => uid !== myUid);
+
+  if (!remaining.length) {
+    await db.ref("dmConversations/"+leavingConvId).remove();
+    await db.ref("dmMessages/"+leavingConvId).remove();
+  } else {
+    await db.ref("dmConversations/"+leavingConvId+"/members/"+myUid).remove();
+    if (conv.createdBy === myUid) {
+      await db.ref("dmConversations/"+leavingConvId+"/createdBy").set(remaining[0]);
+    }
+    await db.ref("dmMessages/"+leavingConvId).push({
+      name: "System", message: myUsername+" left the group.",
+      time: new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),
+      timestamp: Date.now(), color: "var(--text-dim)", userId: "system", system: true
+    });
+    await db.ref("dmConversations/"+leavingConvId).update({ lastMessageAt: Date.now() });
+  }
+
+  showToast("You left the group.", "ok");
+  renderDMConvList();
+}
+
+function cleanupAfterLeaveGC(convId) {
+  if (dmListeners[convId]) {
+    try { dmListeners[convId].ref.off("child_added", dmListeners[convId].fn); } catch(e){}
+    delete dmListeners[convId];
+  }
+  if (dmRenderedIds[convId]) delete dmRenderedIds[convId];
+  const storedLast = localStorage.getItem("snc_last_dm_conv");
+  if (storedLast === convId) localStorage.removeItem("snc_last_dm_conv");
+  if (currentDMConvId === convId) currentDMConvId = null;
+  $("gcSettingsModal").style.display = "none";
+  $("dmChatbox").innerHTML = "";
+  $("dmChatTitle").textContent = "Select a conversation";
+  $("dmChatMembers").textContent = "";
+  $("dmInputRow").style.display = "none";
+  $("gcSettingsBtn").style.display = "none";
+  showToast("You left the group.", "ok");
   renderDMConvList();
 }
 
 // ============================================================
 // ============================================================
 // ============================================================
+
+// ============================================================
+// NOTIFICATION SYSTEM
+// ============================================================
+let notifListener = null;
+let dmToastTimer = null;
+let dmToastQueue = [];
+let dmToastShowing = false;
+
+function setupNotificationSystem() {
+  // Toggle panel on bell button
+  $("notifBtn").addEventListener("click", () => {
+    const panel = $("notifPanel");
+    const isOpen = panel.style.display === "flex";
+    panel.style.display = isOpen ? "none" : "flex";
+    if (!isOpen) {
+      // Mark all as read
+      db.ref("notifications/"+myUid).once("value", snap => {
+        const updates = {};
+        snap.forEach(child => { updates[child.key+"/read"] = true; });
+        if (Object.keys(updates).length) db.ref("notifications/"+myUid).update(updates);
+      });
+      $("notifBadge").style.display = "none";
+      renderNotifPanel();
+    }
+  });
+
+  $("notifPanelClose").addEventListener("click", () => { $("notifPanel").style.display = "none"; });
+  $("clearNotifsBtn").addEventListener("click", async () => {
+    await db.ref("notifications/"+myUid).remove();
+    renderNotifPanel();
+  });
+
+  // DM toast close
+  $("dmToastClose").addEventListener("click", e => {
+    e.stopPropagation();
+    $("dmToast").style.display = "none";
+    dmToastShowing = false;
+    clearTimeout(dmToastTimer);
+    showNextDMToast();
+  });
+  $("dmToast").addEventListener("click", () => {
+    const convId = $("dmToast").dataset.convId;
+    $("dmToast").style.display = "none";
+    dmToastShowing = false;
+    if (convId) {
+      $("dmOverlay").style.display = "flex";
+      renderDMConvList();
+      openDMConversation(convId);
+    }
+  });
+
+  // Listen for new notifications for this user
+  if (notifListener) db.ref("notifications/"+myUid).off("child_added", notifListener);
+  notifListener = db.ref("notifications/"+myUid).orderByChild("timestamp").on("child_added", snap => {
+    const n = snap.val();
+    if (!n) return;
+    // Only show toast for new ones (within last 10s)
+    if (Date.now() - (n.timestamp||0) < 10000 && !n.read) {
+      if (n.type === "dm") {
+        queueDMToast(n);
+      }
+      $("notifBadge").style.display = "";
+    }
+  });
+
+  // Listen for DM messages to generate toasts (if overlay closed)
+  db.ref("dmConversations").on("value", snap => {
+    if (!snap.exists()) return;
+    snap.forEach(convSnap => {
+      const conv = convSnap.val();
+      if (!conv || !conv.members || !conv.members[myUid]) return;
+      // re-listen handled by openDMConversation child_added
+    });
+  });
+}
+
+function queueDMToast(n) {
+  if ($("dmOverlay").style.display === "flex") return; // overlay open, skip toast
+  dmToastQueue.push(n);
+  if (!dmToastShowing) showNextDMToast();
+}
+
+function showNextDMToast() {
+  if (!dmToastQueue.length) return;
+  const n = dmToastQueue.shift();
+  dmToastShowing = true;
+
+  const toast = $("dmToast");
+  toast.dataset.convId = n.convId || "";
+  $("dmToastName").textContent = n.senderName || "Someone";
+  $("dmToastMsg").textContent = n.message || "sent you a message";
+
+  const avatarEl = $("dmToastAvatar");
+  avatarEl.innerHTML = "";
+  const av = buildAvatar(n.senderAvatar||null, n.senderName||"?", n.senderColor||"#4da6ff", 36);
+  avatarEl.appendChild(av);
+
+  toast.style.display = "block";
+  clearTimeout(dmToastTimer);
+  dmToastTimer = setTimeout(() => {
+    toast.style.display = "none";
+    dmToastShowing = false;
+    showNextDMToast();
+  }, 5000);
+}
+
+async function renderNotifPanel() {
+  const list = $("notifList");
+  list.innerHTML = '<div style="padding:12px;font-size:12px;color:var(--text-dim);">Loading...</div>';
+  const snap = await db.ref("notifications/"+myUid).orderByChild("timestamp").limitToLast(50).once("value");
+  list.innerHTML = "";
+  if (!snap.exists()) {
+    list.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-dim);font-size:13px;">No notifications yet.</div>';
+    return;
+  }
+  const items = [];
+  snap.forEach(child => items.push({ id: child.key, ...child.val() }));
+  items.sort((a,b) => (b.timestamp||0) - (a.timestamp||0));
+  items.forEach(n => {
+    const row = document.createElement("div");
+    row.style.cssText = `padding:10px 12px;border-radius:8px;margin-bottom:4px;cursor:pointer;background:${n.read?"transparent":"var(--accent-light)"};border:1px solid ${n.read?"transparent":"var(--border-hover)"};transition:background .15s;`;
+    row.onmouseenter = () => row.style.background = "var(--bg-lighter)";
+    row.onmouseleave = () => row.style.background = n.read ? "transparent" : "var(--accent-light)";
+    const icon = n.type === "dm" ? "💬" : n.type === "broadcast" ? "📢" : "🔔";
+    const time = n.timestamp ? new Date(n.timestamp).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}) : "";
+    row.innerHTML = `<div style="display:flex;align-items:flex-start;gap:8px;">
+      <span style="font-size:18px;flex-shrink:0;">${icon}</span>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13px;font-weight:700;color:var(--text-primary);">${esc(n.title||"Notification")}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">${esc(n.body||"")}</div>
+        <div style="font-size:10px;color:var(--text-dim);margin-top:4px;">${time}</div>
+      </div>
+    </div>`;
+    if (n.type === "dm" && n.convId) {
+      row.addEventListener("click", () => {
+        $("notifPanel").style.display = "none";
+        $("dmOverlay").style.display = "flex";
+        renderDMConvList();
+        openDMConversation(n.convId);
+      });
+    }
+    list.appendChild(row);
+  });
+}
+
+// Called when DM message arrives for a user (triggered from renderDMMessage listener)
+function triggerDMNotification(convId, senderUid, senderName, senderColor, senderAvatar, messageText) {
+  if (senderUid === myUid) return;
+  if (isBlocked(senderUid)) return; // don't notify from blocked users
+  if ($("dmOverlay").style.display === "flex" && currentDMConvId === convId) return;
+  const n = {
+    type: "dm", convId, senderName, senderColor: senderColor||"#4da6ff",
+    senderAvatar: senderAvatar||null, message: messageText,
+    title: senderName + " messaged you",
+    body: messageText, timestamp: Date.now(), read: false
+  };
+  db.ref("notifications/"+myUid).push(n);
+  $("notifBadge").style.display = "";
+  queueDMToast(n);
+}
+
+// ============================================================
+// BROADCAST CHANNEL (owner only — send custom notifications)
+// ============================================================
+function renderBroadcastChannel() {
+  if (!amOwner()) {
+    $("chatbox").innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-dim);">🔒 Owner only.</div>';
+    return;
+  }
+  const chatbox = $("chatbox");
+  chatbox.innerHTML = "";
+
+  const wrap = document.createElement("div");
+  wrap.style.cssText = "padding:24px;max-width:520px;margin:0 auto;";
+  wrap.innerHTML = `
+    <h2 style="font-size:18px;font-weight:800;color:var(--text-primary);margin-bottom:6px;">📢 Send Custom Notification</h2>
+    <p style="font-size:13px;color:var(--text-muted);margin-bottom:20px;">This will send a notification to ALL users that appears in their notification panel.</p>
+    <div style="margin-bottom:12px;">
+      <div style="font-size:11px;font-weight:800;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">Title</div>
+      <input id="broadcastTitle" class="settings-input" placeholder="Notification title..." maxlength="80" style="width:100%;">
+    </div>
+    <div style="margin-bottom:16px;">
+      <div style="font-size:11px;font-weight:800;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">Message</div>
+      <textarea id="broadcastBody" class="settings-textarea" placeholder="Write your message..." maxlength="300" style="width:100%;height:80px;"></textarea>
+    </div>
+    <button id="broadcastSendBtn" class="confirm-btn ok" style="width:100%;padding:12px;">📢 Send to All Users</button>
+    <div id="broadcastMsg" style="margin-top:10px;font-size:12px;"></div>
+  `;
+  chatbox.appendChild(wrap);
+
+  $("broadcastSendBtn").addEventListener("click", async () => {
+    const title = $("broadcastTitle").value.trim();
+    const body = $("broadcastBody").value.trim();
+    if (!title) return;
+    const msg = $("broadcastMsg");
+    msg.style.color = "var(--text-muted)"; msg.textContent = "Sending...";
+
+    // Get all user UIDs and push notification to each individually
+    const usersSnap = await db.ref("users").once("value");
+    const notifPayload = {
+      type: "broadcast", title, body,
+      timestamp: Date.now(), read: false,
+      sentBy: myUsername
+    };
+    const pushPromises = [];
+    usersSnap.forEach(child => {
+      pushPromises.push(db.ref("notifications/"+child.key).push(notifPayload));
+    });
+    await Promise.all(pushPromises);
+    msg.style.color = "var(--accent)"; msg.textContent = "✅ Notification sent to all users!";
+    $("broadcastTitle").value = ""; $("broadcastBody").value = "";
+  });
+}
+
 function openInBlank() {
   const w = window.open("about:blank", "_blank");
   if (!w) return showToast("Popup blocked — allow popups for this site.", "warn");
