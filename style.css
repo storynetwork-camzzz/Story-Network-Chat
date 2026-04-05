@@ -156,7 +156,7 @@ body { font-family: var(--font); background: var(--bg-darkest); color: var(--tex
 .channel-btn.selected { background:var(--accent-light); color:var(--accent); }
 .ch-hash { font-size:14px; flex-shrink:0; }
 .ch-name { flex:1; text-align:left; }
-.unread-pip { width:8px; height:8px; border-radius:50%; background:var(--accent); flex-shrink:0; box-shadow: 0 0 8px var(--accent-glow); animation: pipPulse 2s ease-in-out infinite; }
+.unread-pip { min-width:18px; height:18px; border-radius:9px; background:var(--accent); flex-shrink:0; box-shadow: 0 0 8px var(--accent-glow); font-size:10px; font-weight:800; color:#fff; display:inline-flex; align-items:center; justify-content:center; padding:0 4px; margin-left:auto; }
 .req-badge { background:#ff4d4d; color:#fff; border-radius:10px; padding:1px 6px; font-size:10px; font-weight:800; }
 
 /* Mod-only channel button */
@@ -293,6 +293,9 @@ code { background:var(--bg-lighter); border:1px solid var(--border); border-radi
 #replyBar button:hover { color: #ff4d4d; }
 
 #formatToolbar { display:flex; align-items:center; gap:4px; padding:6px 12px; background:var(--bg-darker,var(--bg-dark)); border-top:1px solid var(--border); flex-wrap:wrap; flex-shrink:0; }
+.sys-msg { text-align:center; font-size:12px; color:var(--text-dim); font-style:italic; padding:6px 16px; margin:2px 0; user-select:none; }
+#gifPickerBtn { background:var(--accent-light); border:1px solid var(--accent); color:var(--accent); border-radius:var(--radius-sm); padding:3px 8px; font-size:11px; font-weight:800; cursor:pointer; font-family:var(--font); transition:all .15s; letter-spacing:.04em; }
+#gifPickerBtn:hover { background:var(--accent); color:#fff; }
 .fmt-btn { background:none; border:1px solid var(--border); border-radius:var(--radius-sm); padding:3px 8px; font-size:12px; color:var(--text-muted); cursor:pointer; font-family:var(--font); transition:all .15s; }
 .fmt-btn:hover { background:var(--accent-light); color:var(--accent); border-color:var(--accent); }
 .fmt-btn.active { background:var(--accent-light); border-color:var(--accent); color:var(--accent); }
