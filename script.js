@@ -21,7 +21,7 @@ const IMGBB_KEY  = "7ae7b64cb4da961ab6a7d18d920099a8";
 const MAX_CHARS  = 250;
 const PAGE_SIZE  = 50;
 const WEEK_MS    = 7 * 24 * 60 * 60 * 1000;
-const BUILTIN_CHANNELS = ["general","offtopic","announcements","modchat","leaderboard","myleaderboard","rules","members","logs","reports","broadcast"];
+const BUILTIN_CHANNELS = ["general","offtopic","announcements","modchat","leaderboard","myleaderboard","rules","members","logs","reports","broadcast","modactions"];
 function getAllChannels() {
   return [...BUILTIN_CHANNELS, ...Object.keys(customChannels)];
 }
@@ -245,6 +245,7 @@ async function applySlurTimeout(message) {
     at: Date.now(),
     timestamp: Date.now()
   });
+  await logPublicModAction("mute", "Auto-muted 30min (AutoMod)", myUid, myUsername, "Slur detected", "AutoMod");
 }
 
 async function autoModBan(targetUid, targetUsername, reason) {
@@ -263,6 +264,7 @@ async function autoModBan(targetUid, targetUsername, reason) {
     type:"auto_ban", action:"Auto-banned user", targetUid, targetUsername,
     by: "AutoMod", byUid: "system", reason: banData.reason, at: Date.now(), timestamp: Date.now()
   });
+  await logPublicModAction("ban", "Auto-banned (AutoMod)", targetUid, targetUsername, banData.reason, "AutoMod");
 }
 
 // ============================================================
@@ -785,6 +787,7 @@ async function muteUser(targetUid, targetUsername) {
           by: myUsername, byUid: myUid,
           duration: dur, at: Date.now(), timestamp: Date.now()
         });
+        await logPublicModAction("mute", "Muted for "+(dur/60000)+" min", targetUid, targetUsername, "", myUsername);
         showToast("🔇 "+targetUsername+" has been muted", "ok");
         resolve(true);
       };
@@ -819,6 +822,7 @@ async function banUser(targetUid, targetUsername) {
     type:"ban", action:"Banned user", targetUid, targetUsername,
     by: myUsername, byUid: myUid, reason: banData.reason, at: Date.now(), timestamp: Date.now()
   });
+  await logPublicModAction("ban", "Banned", targetUid, targetUsername, banData.reason, myUsername);
   showToast("🔨 "+targetUsername+" has been banned", "ok");
 }
 
@@ -885,6 +889,11 @@ function updateSidebarUser() {
   renderSidebarAvatar();
   updateAnnouncementsUI();
   checkMuteStatus();
+  // Remove char limit for owner
+  if (amOwner()) {
+    const inp = $("msgInput");
+    if (inp) inp.removeAttribute("maxlength");
+  }
 }
 
 function renderSidebarAvatar() {
@@ -926,22 +935,37 @@ async function uploadImgBB(file) {
   try {
     const res  = await fetch("https://api.imgbb.com/1/upload?key="+IMGBB_KEY, { method:"POST", body:fd });
     const json = await res.json();
-    return json.success ? json.data.url : null;
+    return json.success ? (json.data.display_url || json.data.url) : null;
   } catch(e) { return null; }
 }
 
 // ============================================================
 // PRESENCE
 // ============================================================
+let presenceConnected = false;
 function setupPresence() {
   const ref = db.ref("presence/"+myUid);
   db.ref(".info/connected").on("value", snap => {
-    if (!snap.val()) return;
+    if (!snap.val()) { presenceConnected = false; return; }
     ref.onDisconnect().remove();
     ref.set({ username: myUsername, color: myColor, uid: myUid });
     const now = new Date();
     const today = now.getFullYear()+"_"+(now.getMonth()+1).toString().padStart(2,"0")+"_"+now.getDate().toString().padStart(2,"0");
     db.ref("users/"+myUid+"/activeDays/"+today).set(true);
+    // Post welcome message to #general only once per tab session (not on Firebase reconnects)
+    if (!presenceConnected) {
+      presenceConnected = true;
+      const welcomeKey = "snc_welcomed_" + myUid;
+      if (!sessionStorage.getItem(welcomeKey)) {
+        sessionStorage.setItem(welcomeKey, "1");
+        const welcomeMsg = {
+          name: "System", message: myUsername + " entered the chat 👋",
+          time: new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),
+          timestamp: Date.now(), color: "#57f287", userId: "system", system: true
+        };
+        db.ref("messages/general").push(welcomeMsg);
+      }
+    }
   });
 }
 
@@ -1207,6 +1231,87 @@ function openNicknameModal(friendUid, currentNickname) {
 // ============================================================
 // USER PROFILE MODAL
 // ============================================================
+// ============================================================
+// ROLE MANAGER MODAL (owner only, supports multiple roles)
+// ============================================================
+function openRoleManager(targetUid, username, userData) {
+  let modal = $("roleManagerModal");
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = "roleManagerModal";
+    modal.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center;z-index:600;backdrop-filter:blur(4px);";
+    document.body.appendChild(modal);
+    modal.addEventListener("click", e => { if (e.target === modal) modal.remove(); });
+  }
+  const currentRoles = userData.customRoles || (userData.customRole ? [userData.customRole] : []);
+  const roleKeys = Object.keys(customRoles);
+
+  modal.innerHTML = "";
+  const card = document.createElement("div");
+  card.className = "confirm-card";
+  card.style.cssText = "width:380px;max-width:95vw;text-align:left;";
+  card.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+      <h3 style="font-size:15px;font-weight:800;">🏷️ Roles for ${esc(username)}</h3>
+      <button onclick="this.closest('#roleManagerModal').remove()" style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:18px;">✕</button>
+    </div>
+    <div style="font-size:11px;font-weight:800;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;">Current Roles</div>
+    <div id="rmCurrentRoles" style="display:flex;flex-wrap:wrap;gap:6px;min-height:32px;margin-bottom:14px;"></div>
+    <div style="font-size:11px;font-weight:800;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;">Add Role</div>
+    <div id="rmAddRoles" style="display:flex;flex-wrap:wrap;gap:6px;"></div>`;
+  modal.appendChild(card);
+
+  function refreshRoleManager(liveRoles) {
+    const cur = $("rmCurrentRoles");
+    const add = $("rmAddRoles");
+    if (!cur || !add) return;
+    cur.innerHTML = "";
+    add.innerHTML = "";
+
+    if (!liveRoles.length) {
+      cur.innerHTML = '<span style="font-size:12px;color:var(--text-dim);">No roles assigned</span>';
+    } else {
+      liveRoles.forEach(rk => {
+        if (!customRoles[rk]) return;
+        const cr = customRoles[rk];
+        const tag = document.createElement("span");
+        tag.style.cssText = `display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:800;padding:3px 8px;border-radius:6px;background:${cr.color}22;color:${cr.color};border:1px solid ${cr.color}55;cursor:pointer;`;
+        tag.innerHTML = `[${esc(cr.name)}] <span style="font-size:13px;opacity:.7;">✕</span>`;
+        tag.title = "Click to remove";
+        tag.addEventListener("click", async () => {
+          const updated = liveRoles.filter(k => k !== rk);
+          await db.ref("users/"+targetUid).update({ customRole: updated[0]||null, customRoles: updated });
+          showToast("Role removed from "+username,"ok");
+          refreshRoleManager(updated);
+        });
+        cur.appendChild(tag);
+      });
+    }
+
+    const unassigned = roleKeys.filter(k => !liveRoles.includes(k));
+    if (!unassigned.length) {
+      add.innerHTML = '<span style="font-size:12px;color:var(--text-dim);">All roles assigned</span>';
+    } else {
+      unassigned.forEach(rk => {
+        const cr = customRoles[rk];
+        const btn = document.createElement("button");
+        btn.style.cssText = `font-size:11px;font-weight:800;padding:3px 10px;border-radius:6px;background:var(--bg-lighter);color:${cr.color};border:1px solid ${cr.color}55;cursor:pointer;font-family:var(--font);transition:all .15s;`;
+        btn.textContent = "+ " + cr.name;
+        btn.addEventListener("click", async () => {
+          const updated = [...liveRoles, rk];
+          await db.ref("users/"+targetUid).update({ customRole: updated[0]||null, customRoles: updated });
+          showToast("Role ["+cr.name+"] added to "+username,"ok");
+          refreshRoleManager(updated);
+        });
+        add.appendChild(btn);
+      });
+    }
+  }
+
+  refreshRoleManager([...currentRoles]);
+  modal.style.display = "flex";
+}
+
 async function openProfile(targetUid) {
   const modal = $("profileModal");
   const userData = allUsersCache[targetUid] || {};
@@ -1368,30 +1473,13 @@ async function openProfile(targetUid) {
       });
       actionsEl.appendChild(warnBtn);
 
-      // Set Custom Role (owner only, single role per user)
+      // Manage Custom Roles (owner only, multiple roles per user)
       if (amOwner() && Object.keys(customRoles).length > 0) {
-        const currentRoleKey = (userData.customRoles && userData.customRoles[0]) || userData.customRole || "";
+        const currentRoles = userData.customRoles || (userData.customRole ? [userData.customRole] : []);
         const roleBtn = document.createElement("button"); roleBtn.className="profile-action-btn";
         roleBtn.style.cssText = "border-color:rgba(168,85,247,0.4);color:#a855f7;";
-        roleBtn.textContent = currentRoleKey ? "🏷️ Change Role" : "🏷️ Set Role";
-        roleBtn.addEventListener("click", async () => {
-          const roleKeys = Object.keys(customRoles);
-          const options = ["(none)", ...roleKeys.map(k => customRoles[k].name + " [" + k + "]")];
-          const choice = prompt("Set role for " + username + ":\n" + options.map((o,i) => i+": "+o).join("\n") + "\n\nEnter number:");
-          if (choice === null) return;
-          const idx = parseInt(choice);
-          if (isNaN(idx) || idx < 0 || idx >= options.length) return showToast("Invalid choice","warn");
-          if (idx === 0) {
-            await db.ref("users/"+targetUid).update({ customRole: null, customRoles: [] });
-            showToast("Role removed from " + username, "ok");
-          } else {
-            const selectedKey = roleKeys[idx - 1];
-            await db.ref("users/"+targetUid).update({ customRole: selectedKey, customRoles: [selectedKey] });
-            showToast("Role [" + customRoles[selectedKey].name + "] set for " + username, "ok");
-          }
-          $("profileModal").style.display = "none";
-          openProfile(targetUid);
-        });
+        roleBtn.textContent = "🏷️ Manage Roles";
+        roleBtn.addEventListener("click", () => openRoleManager(targetUid, username, userData));
         actionsEl.appendChild(roleBtn);
       }
 
@@ -1755,18 +1843,19 @@ function switchChannel(ch) {
     announcements:"announcements", modchat:"mod-chat",
     leaderboard:"leaderboard", myleaderboard:"my leaderboard",
     rules:"rules", members:"members",
-    logs:"mod-logs", reports:"reports", broadcast:"send-notification"
+    logs:"mod-logs", reports:"reports", broadcast:"send-notification",
+    modactions:"mod-actions", "gif-manager":"gif-manager"
   };
   const chLabel = builtinLabels[ch] || (customChannels[ch] ? customChannels[ch].name : ch);
   $("channelLabel").textContent = chLabel;
   $("msgInput").placeholder = "Message #" + chLabel;
-  const pip = $("pip-"+ch); if(pip) pip.style.display="none";
+  clearUnread(ch);
 
   const isAnnouncements = ch === "announcements";
   const isRules = ch === "rules";
   const isModChat = ch === "modchat";
   const isLeaderboard = ch === "leaderboard" || ch === "myleaderboard";
-  const isSpecialReadOnly = ch === "members" || ch === "logs" || ch === "reports" || ch === "broadcast";
+  const isSpecialReadOnly = ch === "members" || ch === "logs" || ch === "reports" || ch === "broadcast" || ch === "modactions" || ch === "gif-manager";
 
   $("inputRow").style.display = "flex";
   $("formatToolbar").style.display = "flex";
@@ -1827,6 +1916,10 @@ function switchChannel(ch) {
     renderReportsChannel();
   } else if (ch === "broadcast") {
     renderBroadcastChannel();
+  } else if (ch === "modactions") {
+    renderModActionsChannel();
+  } else if (ch === "gif-manager") {
+    renderGifManagerChannel();
   } else {
     loadMessages(ch);
   }
@@ -2291,15 +2384,31 @@ async function loadOlderMessages(ch, oldestKey, btn) {
 // ============================================================
 // UNREAD DOTS
 // ============================================================
+const unreadCounts = {};
+
 function setupUnreadListeners() {
   getAllChannels().forEach(ch => {
     if (ch===currentChannel || ch==="leaderboard" || ch==="myleaderboard") return;
     db.ref("messages/"+ch).off("child_added");
+    if (!unreadCounts[ch]) unreadCounts[ch] = 0;
     const since = Date.now();
     db.ref("messages/"+ch).orderByChild("timestamp").startAt(since).on("child_added", () => {
-      if (currentChannel!==ch) { const pip=$("pip-"+ch); if(pip) pip.style.display="inline-block"; }
+      if (currentChannel!==ch) {
+        unreadCounts[ch] = (unreadCounts[ch]||0) + 1;
+        const pip=$("pip-"+ch);
+        if(pip) {
+          pip.style.display="inline-flex";
+          pip.textContent = unreadCounts[ch] > 99 ? "99+" : String(unreadCounts[ch]);
+        }
+      }
     });
   });
+}
+
+function clearUnread(ch) {
+  unreadCounts[ch] = 0;
+  const pip = $("pip-"+ch);
+  if (pip) { pip.style.display="none"; pip.textContent=""; }
 }
 
 // ============================================================
@@ -2343,6 +2452,18 @@ function renderMessage(data, ch, isNew, prepend) {
   const isAnnCh     = ch === "announcements";
 
   if (data.type === "poll") return renderPollMessage(data, ch, isNew, prepend);
+
+  // System messages (join/leave/mod announcements)
+  if (data.system || data.userId === "system") {
+    const sysEl = document.createElement("div");
+    sysEl.className = "sys-msg";
+    sysEl.textContent = data.message || "";
+    const chatbox = $("chatbox");
+    if (prepend && chatbox.firstChild) chatbox.insertBefore(sysEl, chatbox.firstChild);
+    else chatbox.appendChild(sysEl);
+    if (isNew && !userScrolledUp) requestAnimationFrame(() => scrollToBottom(true));
+    return;
+  }
 
   const wrapper = document.createElement("div");
   wrapper.className = "msg-wrapper "+(isMine?"mine":"other");
@@ -2410,7 +2531,7 @@ function renderMessage(data, ch, isNew, prepend) {
 
   const textEl = document.createElement("div"); textEl.className="msg-text";
 
-  if (data.type==="image" && data.imageUrl) {
+  if ((data.type==="image" || data.type==="gif") && data.imageUrl) {
     if (data.imageSpoiler) {
       const sw = document.createElement("div"); sw.className="img-spoiler";
       const si = document.createElement("img"); si.src=data.imageUrl; si.className="msg-image";
@@ -2429,6 +2550,12 @@ function renderMessage(data, ch, isNew, prepend) {
       img.addEventListener("load", () => { if (!userScrolledUp) scrollToBottom(true); });
       img.addEventListener("click", e => { e.stopPropagation(); openLightbox(data.imageUrl); });
       textEl.appendChild(img);
+      if (data.type==="gif" && data.gifName) {
+        const lbl = document.createElement("div");
+        lbl.style.cssText = "font-size:10px;color:var(--text-dim);margin-top:3px;font-style:italic;";
+        lbl.textContent = "GIF: " + data.gifName;
+        textEl.appendChild(lbl);
+      }
     }
   } else if (message) {
     const trimmed = message.trim();
@@ -2985,6 +3112,227 @@ function clearReply() { replyingTo=null; $("replyBar").style.display="none"; }
 $("cancelReply").addEventListener("click", clearReply);
 
 // ============================================================
+// GIF SYSTEM (preset GIFs — any user can upload, everyone can send)
+// ============================================================
+let allPresetGifs = []; // cache
+
+function openGifPicker() {
+  let modal = $("gifPickerModal");
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = "gifPickerModal";
+    modal.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center;z-index:500;backdrop-filter:blur(4px);";
+    document.body.appendChild(modal);
+    modal.addEventListener("click", e => { if (e.target === modal) modal.style.display = "none"; });
+  }
+
+  modal.innerHTML = "";
+  const card = document.createElement("div");
+  card.className = "confirm-card";
+  card.style.cssText = "width:460px;max-width:96vw;height:80vh;display:flex;flex-direction:column;overflow:hidden;text-align:left;";
+  card.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-shrink:0;">
+      <h3 style="font-size:15px;font-weight:800;">🎬 GIFs</h3>
+      <button onclick="this.closest('#gifPickerModal').style.display='none'" style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:18px;">✕</button>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;flex-shrink:0;">
+      <button id="gifBrowseTab" class="confirm-btn ok" style="flex:1;padding:7px;font-size:12px;">Browse GIFs</button>
+      <button id="gifUploadTab" class="confirm-btn cancel" style="flex:1;padding:7px;font-size:12px;">+ Upload GIF</button>
+    </div>
+    <div id="gifBrowsePane" style="flex:1;overflow-y:auto;">
+      <div id="gifGrid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;"></div>
+    </div>
+    <div id="gifUploadPane" style="display:none;flex:1;overflow-y:auto;">
+      <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">Upload a GIF that everyone can use. Max 4MB.</p>
+      <div style="margin-bottom:10px;">
+        <div style="font-size:10px;font-weight:800;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px;">Name</div>
+        <input id="gifNameInput" class="settings-input" placeholder="e.g. catjam" maxlength="30" style="width:100%;">
+      </div>
+      <button id="gifUploadBtn" class="confirm-btn ok" style="width:100%;padding:10px;">📤 Select & Upload GIF</button>
+      <input type="file" id="gifFileInput" accept="image/gif" style="display:none;">
+      <div id="gifUploadMsg" style="margin-top:8px;font-size:12px;"></div>
+    </div>`;
+  modal.appendChild(card);
+
+  const browseTab = $("gifBrowseTab");
+  const uploadTab = $("gifUploadTab");
+  const browsePane = $("gifBrowsePane");
+  const uploadPane = $("gifUploadPane");
+
+  browseTab.addEventListener("click", () => {
+    browsePane.style.display = ""; uploadPane.style.display = "none";
+    browseTab.classList.add("ok"); browseTab.classList.remove("cancel");
+    uploadTab.classList.add("cancel"); uploadTab.classList.remove("ok");
+  });
+  uploadTab.addEventListener("click", () => {
+    browsePane.style.display = "none"; uploadPane.style.display = "";
+    uploadTab.classList.add("ok"); uploadTab.classList.remove("cancel");
+    browseTab.classList.add("cancel"); browseTab.classList.remove("ok");
+  });
+
+  // Upload handler
+  $("gifUploadBtn").addEventListener("click", () => $("gifFileInput").click());
+  $("gifFileInput").addEventListener("change", async () => {
+    const file = $("gifFileInput").files[0]; if (!file) return;
+    $("gifFileInput").value = "";
+    if (!file.type.includes("gif")) return setGifMsg("Only GIF files allowed.", false);
+    if (file.size > 4*1024*1024) return setGifMsg("Max 4MB per GIF.", false);
+    const name = ($("gifNameInput").value.trim() || "gif_" + Date.now()).replace(/\s+/g,"_").substring(0,30);
+    setGifMsg("Uploading...", true);
+    const url = await uploadImgBB(file);
+    if (!url) return setGifMsg("Upload failed.", false);
+    await db.ref("config/presetGifs").push({ url, name, uploadedBy: myUsername, uploadedAt: Date.now() });
+    setGifMsg("✅ GIF uploaded! Upload another or browse.", true);
+    $("gifNameInput").value = "";
+    loadGifGrid();
+  });
+
+  function setGifMsg(msg, ok) {
+    const el = $("gifUploadMsg");
+    if (el) { el.textContent = msg; el.style.color = ok ? "var(--accent)" : "#ff4d4d"; }
+  }
+
+  loadGifGrid();
+  modal.style.display = "flex";
+}
+
+function loadGifGrid() {
+  const grid = $("gifGrid");
+  if (!grid) return;
+  grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:20px;color:var(--text-muted);font-size:12px;">Loading GIFs...</div>';
+
+  db.ref("config/presetGifs").once("value", snap => {
+    // Re-query grid in case modal was rebuilt while async was in flight
+    const g = $("gifGrid");
+    if (!g) return;
+    g.innerHTML = "";
+    const val = snap.val();
+    if (!val) {
+      g.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:20px;color:var(--text-dim);font-size:12px;">No GIFs yet — be the first to upload one!</div>';
+      return;
+    }
+    const gifs = Object.entries(val).map(([id, v]) => ({ id, ...v }));
+    gifs.sort((a,b) => (b.uploadedAt||0) - (a.uploadedAt||0));
+
+    gifs.forEach(gif => {
+      const cell = document.createElement("div");
+      cell.style.cssText = "position:relative;border-radius:8px;overflow:hidden;cursor:pointer;border:2px solid transparent;transition:border-color .15s;aspect-ratio:1;background:var(--bg-lighter);";
+      cell.onmouseenter = () => cell.style.borderColor = "var(--accent)";
+      cell.onmouseleave = () => cell.style.borderColor = "transparent";
+
+      const img = document.createElement("img");
+      img.src = gif.url;
+      img.style.cssText = "width:100%;height:100%;object-fit:cover;display:block;";
+      img.title = gif.name;
+
+      const label = document.createElement("div");
+      label.style.cssText = "position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,.6);font-size:9px;font-weight:700;color:#fff;padding:3px 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+      label.textContent = gif.name;
+
+      cell.appendChild(img);
+      cell.appendChild(label);
+
+      cell.addEventListener("click", () => {
+        sendGifMessage(gif.url, gif.name);
+        $("gifPickerModal").style.display = "none";
+      });
+
+      g.appendChild(cell);
+    });
+  });
+}
+
+function renderGifManagerChannel() {
+  const chatbox = $("chatbox");
+  chatbox.innerHTML = "";
+
+  const wrap = document.createElement("div");
+  wrap.style.cssText = "padding:20px;";
+
+  const title = document.createElement("div");
+  title.style.cssText = "font-size:18px;font-weight:800;color:var(--text-primary);margin-bottom:6px;";
+  title.textContent = "🎬 GIF Manager";
+  const sub = document.createElement("div");
+  sub.style.cssText = "font-size:12px;color:var(--text-muted);margin-bottom:20px;";
+  sub.textContent = "All uploaded GIFs. Mods and owners can remove any GIF.";
+  wrap.appendChild(title);
+  wrap.appendChild(sub);
+
+  const grid = document.createElement("div");
+  grid.style.cssText = "display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:14px;";
+  grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:30px;color:var(--text-dim);font-size:13px;">Loading GIFs...</div>';
+  wrap.appendChild(grid);
+  chatbox.appendChild(wrap);
+
+  db.ref("config/presetGifs").once("value", snap => {
+    grid.innerHTML = "";
+    const val = snap.val();
+    if (!val) {
+      grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:30px;color:var(--text-dim);font-size:13px;">No GIFs uploaded yet.</div>';
+      return;
+    }
+    const gifs = Object.entries(val).map(([id, v]) => ({ id, ...v }));
+    gifs.sort((a,b) => (b.uploadedAt||0) - (a.uploadedAt||0));
+
+    gifs.forEach(gif => {
+      const card = document.createElement("div");
+      card.style.cssText = "background:var(--bg-lighter);border:1px solid var(--border);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;";
+
+      const img = document.createElement("img");
+      img.src = gif.url;
+      img.style.cssText = "width:100%;aspect-ratio:1;object-fit:cover;display:block;";
+
+      const info = document.createElement("div");
+      info.style.cssText = "padding:8px 10px;";
+
+      const name = document.createElement("div");
+      name.style.cssText = "font-size:12px;font-weight:700;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+      name.textContent = gif.name || "untitled";
+
+      const meta = document.createElement("div");
+      meta.style.cssText = "font-size:10px;color:var(--text-muted);margin-top:2px;";
+      const uploadDate = gif.uploadedAt ? new Date(gif.uploadedAt).toLocaleDateString() : "unknown date";
+      meta.textContent = "by " + (gif.uploadedBy || "unknown") + " · " + uploadDate;
+
+      const removeBtn = document.createElement("button");
+      removeBtn.textContent = "🗑️ Remove GIF";
+      removeBtn.style.cssText = "margin-top:8px;width:100%;padding:6px;background:rgba(237,66,69,0.15);border:1px solid rgba(237,66,69,0.4);color:#ed4245;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;";
+      removeBtn.addEventListener("click", async () => {
+        const confirmed = await showConfirm("🗑️", "Remove GIF", "Remove \"" + (gif.name||"this GIF") + "\" for everyone?");
+        if (!confirmed) return;
+        await db.ref("config/presetGifs/" + gif.id).remove();
+        card.remove();
+        showToast("GIF removed.", "ok");
+      });
+
+      info.appendChild(name);
+      info.appendChild(meta);
+      info.appendChild(removeBtn);
+      card.appendChild(img);
+      card.appendChild(info);
+      grid.appendChild(card);
+    });
+  });
+}
+
+function sendGifMessage(gifUrl, gifName) {
+  if (currentChannel === "announcements" && !amOwner()) return;
+  if (currentChannel === "modchat" && !amOwner() && !amMod()) return;
+  if (currentChannel === "leaderboard" || currentChannel === "myleaderboard") return;
+  if (isMuted(myUid)) return showToast("You are muted!", "warn");
+  const now = Date.now();
+  db.ref("messages/"+currentChannel).push({
+    name: myUsername, message: "",
+    imageUrl: gifUrl, type: "gif", gifName: gifName||"",
+    time: new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),
+    timestamp: now, color: myColor, userId: myUid, avatarUrl: myAvatar||null
+  });
+  db.ref("users/"+myUid).update({ username: myUsername, color: myColor, avatarUrl: myAvatar||null });
+  db.ref("users/"+myUid+"/messageCount").transaction(c => (c||0)+1);
+  checkAchievements();
+}
+
+// ============================================================
 // FORMAT TOOLBAR
 // ============================================================
 function setupFormatToolbar() {
@@ -3019,6 +3367,9 @@ function setupFormatToolbar() {
       }
     });
   });
+  // GIF picker button
+  const gifBtn = $("gifPickerBtn");
+  if (gifBtn) gifBtn.addEventListener("click", e => { e.stopPropagation(); openGifPicker(); });
 }
 
 // ============================================================
@@ -3026,6 +3377,8 @@ function setupFormatToolbar() {
 // ============================================================
 function setupInput() {
   const input=$("msgInput");
+  // Remove maxlength for owner so they have no character limit
+  if (amOwner()) input.removeAttribute("maxlength");
   input.addEventListener("input", () => {
     input.style.height="auto"; input.style.height=Math.min(input.scrollHeight,130)+"px";
     updateCharCounter(); handleTyping(); handleMentionSuggest();
@@ -4409,6 +4762,10 @@ function setupNotificationSystem() {
     if (Date.now() - (n.timestamp||0) < 10000 && !n.read) {
       if (n.type === "dm") {
         queueDMToast(n);
+      } else if (n.type === "broadcast") {
+        showBroadcastToast(n);
+      } else if (n.type === "mention") {
+        showMentionToast(n);
       }
       $("notifBadge").style.display = "";
     }
@@ -4453,6 +4810,51 @@ function showNextDMToast() {
     dmToastShowing = false;
     showNextDMToast();
   }, 5000);
+}
+
+function showBroadcastToast(n) {
+  let t = document.querySelector(".broadcast-toast");
+  if (!t) {
+    t = document.createElement("div");
+    t.className = "broadcast-toast";
+    t.style.cssText = "position:fixed;top:130px;right:20px;background:var(--bg-lighter);border:1px solid var(--accent);border-radius:12px;padding:12px 16px;z-index:9998;max-width:300px;box-shadow:0 8px 32px rgba(0,0,0,0.5);animation:slideInRight .3s ease;";
+    document.body.appendChild(t);
+  }
+  t.innerHTML = `
+    <div style="display:flex;align-items:flex-start;gap:10px;">
+      <span style="font-size:20px;flex-shrink:0;">📢</span>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13px;font-weight:800;color:var(--accent);">${esc(n.title||"Announcement")}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(n.body||"")}</div>
+      </div>
+      <button onclick="this.closest('.broadcast-toast').remove()" style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:14px;flex-shrink:0;">✕</button>
+    </div>`;
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.remove(), 7000);
+}
+
+function showMentionToast(n) {
+  let t = document.querySelector(".mention-toast");
+  if (!t) {
+    t = document.createElement("div");
+    t.className = "mention-toast";
+    t.style.cssText = "position:fixed;top:190px;right:20px;background:var(--bg-lighter);border:1px solid rgba(255,215,0,0.5);border-radius:12px;padding:12px 16px;z-index:9998;max-width:300px;box-shadow:0 8px 32px rgba(0,0,0,0.5);animation:slideInRight .3s ease;cursor:pointer;";
+    document.body.appendChild(t);
+  }
+  t.innerHTML = `
+    <div style="display:flex;align-items:flex-start;gap:10px;">
+      <span style="font-size:20px;flex-shrink:0;">🔔</span>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13px;font-weight:800;color:#ffd700;">${esc(n.title||"Mention")}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(n.body||"")}</div>
+      </div>
+      <button onclick="this.closest('.mention-toast').remove()" style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:14px;flex-shrink:0;">✕</button>
+    </div>`;
+  if (n.channel) {
+    t.addEventListener("click", () => { switchChannel(n.channel); t.remove(); });
+  }
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.remove(), 5000);
 }
 
 async function renderNotifPanel() {
@@ -4560,6 +4962,66 @@ function renderBroadcastChannel() {
     await Promise.all(pushPromises);
     msg.style.color = "var(--accent)"; msg.textContent = "✅ Notification sent to all users!";
     $("broadcastTitle").value = ""; $("broadcastBody").value = "";
+  });
+}
+
+// ============================================================
+// PUBLIC MOD ACTIONS CHANNEL (visible to all, auto-populated)
+// ============================================================
+async function renderModActionsChannel() {
+  const chatbox = $("chatbox");
+  chatbox.innerHTML = '<div style="padding:16px;color:var(--text-muted);font-size:12px;">Loading...</div>';
+
+  const snap = await db.ref("publicModLogs").orderByChild("timestamp").limitToLast(100).once("value");
+  chatbox.innerHTML = "";
+
+  const title = document.createElement("div");
+  title.style.cssText = "padding:20px 16px 4px;font-size:18px;font-weight:800;color:var(--text-primary);";
+  title.textContent = "🔨 Mod Actions";
+  chatbox.appendChild(title);
+  const sub = document.createElement("div");
+  sub.style.cssText = "padding:0 16px 16px;font-size:12px;color:var(--text-muted);";
+  sub.textContent = "Public record of bans, mutes, and timeouts.";
+  chatbox.appendChild(sub);
+
+  if (!snap.exists()) {
+    chatbox.innerHTML += '<div style="padding:20px;color:var(--text-dim);text-align:center;font-size:13px;">No mod actions yet.</div>';
+    return;
+  }
+
+  const entries = [];
+  snap.forEach(child => entries.push({ id: child.key, ...child.val() }));
+  entries.sort((a,b) => b.timestamp - a.timestamp);
+
+  const typeIcon = { ban:"🔨", unban:"✅", mute:"🔇", unmute:"🔊", timeout:"⏱️", warn:"⚠️" };
+  const typeColor = { ban:"#ff4d4d", unban:"#57f287", mute:"#fbbf24", unmute:"#67e8f9", timeout:"#fb923c", warn:"#facc15" };
+
+  entries.forEach(log => {
+    const card = document.createElement("div");
+    card.style.cssText = "display:flex;align-items:flex-start;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border);";
+    const ic = typeIcon[log.type] || "🛡️";
+    const col = typeColor[log.type] || "#aaa";
+    const time = new Date(log.timestamp).toLocaleString();
+    card.innerHTML = `
+      <div style="font-size:24px;flex-shrink:0;line-height:1;">${ic}</div>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13px;font-weight:800;color:${col};">${esc(log.action||log.type)}</div>
+        <div style="font-size:13px;color:var(--text-primary);margin-top:2px;">
+          <strong style="color:var(--accent);">${esc(log.targetUsername||"Unknown")}</strong>
+          ${log.reason ? '<span style="color:var(--text-muted);"> — ' + esc(log.reason) + '</span>' : ''}
+        </div>
+        <div style="font-size:11px;color:var(--text-dim);margin-top:3px;">by ${esc(log.by||"System")} · ${time}</div>
+      </div>`;
+    chatbox.appendChild(card);
+  });
+}
+
+// Call this whenever a ban/mute/timeout is issued to log it publicly
+async function logPublicModAction(type, action, targetUid, targetUsername, reason, by) {
+  await db.ref("publicModLogs").push({
+    type, action, targetUid, targetUsername,
+    reason: reason || "", by: by || myUsername,
+    timestamp: Date.now()
   });
 }
 
