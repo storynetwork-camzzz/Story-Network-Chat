@@ -134,6 +134,11 @@
             <span class="ch-name">members</span>
             <span class="unread-pip" id="pip-members" style="display:none;"></span>
           </button>
+          <button class="channel-btn" data-channel="modactions">
+            <span class="ch-hash">🔨</span>
+            <span class="ch-name">mod-actions</span>
+            <span class="unread-pip" id="pip-modactions" style="display:none;"></span>
+          </button>
           <button class="channel-btn" id="friendsBtn">
             <span class="ch-hash">🤝</span>
             <span class="ch-name">friends</span>
@@ -182,6 +187,10 @@
           <button class="channel-btn" data-channel="broadcast" id="broadcastBtn" style="display:none;">
             <span class="ch-hash">📢</span>
             <span class="ch-name">send-notification</span>
+          </button>
+          <button class="channel-btn" data-channel="gif-manager" id="gifManagerBtn">
+            <span class="ch-hash">🎬</span>
+            <span class="ch-name">gif-manager</span>
           </button>
         </div>
 
@@ -268,6 +277,8 @@
         </div>
         <div class="fmt-divider"></div>
         <button class="fmt-btn spoiler-btn" data-fmt="spoiler" title="Spoiler">👁 Spoiler</button>
+        <div class="fmt-divider"></div>
+        <button class="fmt-btn" id="gifPickerBtn" title="Send a GIF">GIF</button>
       </div>
 
       <div id="inputRow">
@@ -645,7 +656,7 @@
   </div>
 
   <!-- DM Toast popup -->
-  <div id="dmToast" style="display:none;position:fixed;bottom:80px;right:20px;background:var(--bg-lighter);border:1px solid var(--border);border-radius:12px;padding:12px 16px;z-index:9998;max-width:280px;box-shadow:0 8px 32px rgba(0,0,0,0.5);cursor:pointer;animation:slideInRight .3s ease;">
+  <div id="dmToast" style="display:none;position:fixed;top:70px;right:20px;background:var(--bg-lighter);border:1px solid var(--border);border-radius:12px;padding:12px 16px;z-index:9998;max-width:280px;box-shadow:0 8px 32px rgba(0,0,0,0.5);cursor:pointer;animation:slideInRight .3s ease;">
     <div style="display:flex;align-items:center;gap:10px;">
       <div id="dmToastAvatar" style="width:36px;height:36px;border-radius:50%;flex-shrink:0;overflow:hidden;"></div>
       <div style="flex:1;min-width:0;">
